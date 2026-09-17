@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Seguimiento de Estaciones</title>
+<style>
+  :root{
+    --bg: #f4f5f7;
+    --card: #ffffff;
+    --text: #1a1d23;
+    --text-dim: #5b6270;
+    --border: #e2e4e9;
+    --primary: #2d6cdf;
+    --primary-dim: #e8f0ff;
+    --green: #1f9d55;
+    --green-dim: #e7f8ee;
+    --amber: #b5750a;
+    --amber-dim: #fdf1dc;
+    --red: #d1403a;
+    --red-dim: #fbe9e8;
+    --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]){
+      --bg: #14161a;
+      --card: #1e2126;
+      --text: #eceef1;
+      --text-dim: #9aa1ad;
+      --border: #2c3038;
+      --primary: #5b8def;
+      --primary-dim: #1c2a44;
+      --green: #3ec97a;
+      --green-dim: #103823;
+      --amber: #e0a339;
+      --amber-dim: #3a2c0f;
+      --red: #f0655f;
+      --red-dim: #3d1a19;
+      --shadow: 0 1px 3px rgba(0,0,0,0.4);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg: #14161a;
+    --card: #1e2126;
+    --text: #eceef1;
+    --text-dim: #9aa1ad;
+    --border: #2c3038;
+    --primary: #5b8def;
+    --primary-dim: #1c2a44;
+    --green: #3ec97a;
+    --green-dim: #103823;
+    --amber: #e0a339;
+    --amber-dim: #3a2c0f;
+    --red: #f0655f;
+    --red-dim: #3d1a19;
+    --shadow: 0 1px 3px rgba(0,0,0,0.4);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin:0; padding:0; background:var(--bg); color:var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  body { min-height:100vh; padding-bottom: 40px; }
+  header {
+    padding: 14px 16px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--card);
+    position: sticky; top:0; z-index: 20;
+  }
+  h1 { font-size: 18px; margin: 0 0 10px; display:flex; align-items:center; gap:8px; }
+  .rowline { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  select, input[type=text], input[type=number], input[type=time] {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px; font-size: 14px;
+  }
+  select { min-width: 160px; }
+  button {
+    border: none; border-radius: 8px; padding: 9px 14px; font-size: 14px;
+    cursor: pointer; font-weight: 600; transition: transform .05s ease;
+  }
+  button:active { transform: scale(0.97); }
+  button.primary { background: var(--primary); color: white; }
+  button.ghost { background: var(--primary-dim); color: var(--primary); }
+  button.danger { background: var(--red-dim); color: var(--red); }
+  button.subtle { background: transparent; color: var(--text-dim); border:1px solid var(--border); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .tabs { display:flex; gap: 6px; margin-top: 12px; overflow-x:auto; }
+  .tab {
+    padding: 8px 14px; border-radius: 999px; background: transparent; color: var(--text-dim);
+    font-size: 14px; white-space:nowrap; border:1px solid transparent;
+  }
+  .tab.active { background: var(--primary-dim); color: var(--primary); font-weight:700; }
+  main { max-width: 880px; margin: 0 auto; padding: 16px; }
+  .card {
+    background: var(--card); border:1px solid var(--border); border-radius: 14px;
+    padding: 14px 16px; margin-bottom: 14px; box-shadow: var(--shadow);
+  }
+  .card h2 { margin:0 0 10px; font-size: 15px; }
+  .card h3 { margin: 0; font-size: 15px; }
+  .muted { color: var(--text-dim); font-size: 13px; }
+  .empty { color: var(--text-dim); font-size: 14px; padding: 20px 0; text-align:center; }
+  .station-header { display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; }
+  .machine-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(130px,1fr)); gap: 8px; margin: 12px 0; }
+  .machine-slot {
+    border-radius: 10px; padding: 10px; text-align:center; border:1px solid var(--border);
+  }
+  .machine-slot.idle { background: var(--bg); color: var(--text-dim); }
+  .machine-slot.busy { background: var(--green-dim); color: var(--green); }
+  .machine-slot .timer { font-size: 18px; font-weight:700; font-variant-numeric: tabular-nums; margin-top:2px; }
+  table { width:100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+  th, td { text-align:left; padding: 6px 6px; border-bottom: 1px solid var(--border); }
+  th { color: var(--text-dim); font-weight:600; }
+  tr.active-period td { background: var(--primary-dim); }
+  .eff-good { color: var(--green); font-weight:700; }
+  .eff-bad { color: var(--red); font-weight:700; }
+  .eff-mid { color: var(--amber); font-weight:700; }
+  .inline-list { display:flex; flex-direction:column; gap: 8px; }
+  .list-item {
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    padding: 10px 12px; border:1px solid var(--border); border-radius:10px; cursor:pointer;
+    background: var(--bg);
+  }
+  .list-item.selected { border-color: var(--primary); background: var(--primary-dim); }
+  .list-item .actions { display:flex; gap:6px; }
+  .list-item .actions button { padding: 5px 9px; font-size: 12px; }
+  .period-row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-bottom:6px; }
+  .period-row input { width: auto; }
+  .big-btns { display:flex; flex-direction:column; gap: 12px; margin-top: 14px; }
+  .big-btn {
+    padding: 26px 16px; font-size: 18px; border-radius: 16px; font-weight: 800;
+  }
+  .big-btn.start { background: var(--green-dim); color: var(--green); border: 2px solid var(--green); }
+  .big-btn.finish { background: var(--red-dim); color: var(--red); border: 2px solid var(--red); }
+  .toast {
+    position: fixed; left:50%; bottom: 24px; transform: translateX(-50%);
+    background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 10px;
+    font-size: 14px; max-width: 90vw; text-align:center; z-index: 100; box-shadow: var(--shadow);
+  }
+  .banner {
+    background: var(--amber-dim); color: var(--amber); border-radius: 10px; padding: 10px 12px;
+    font-size: 13px; margin-bottom: 12px;
+  }
+  .add-row { display:flex; gap: 8px; margin-top: 10px; }
+  .add-row input { flex:1; }
+  .section-title { font-size: 13px; text-transform: uppercase; letter-spacing:.03em; color: var(--text-dim); margin: 18px 0 8px; }
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.45); display:flex;
+    align-items:center; justify-content:center; z-index: 200; padding: 20px;
+  }
+  .modal-box {
+    background: var(--card); border-radius: 14px; padding: 18px; max-width: 360px; width:100%;
+    box-shadow: var(--shadow); border:1px solid var(--border);
+  }
+  .modal-box h3 { margin: 0 0 12px; font-size: 15px; }
+  .modal-box input[type=text] { width:100%; margin-bottom: 12px; }
+  .modal-actions { display:flex; justify-content:flex-end; gap:8px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🏭 Seguimiento de Estaciones</h1>
+  <div class="rowline">
+    <select id="lineSelect"></select>
+    <button class="ghost" id="btnNewLine">+ Línea</button>
+  </div>
+  <div class="tabs">
+    <div class="tab" data-tab="config">⚙️ Configuración</div>
+    <div class="tab" data-tab="monitor">📊 Monitor</div>
+    <div class="tab" data-tab="station">🖲️ Estación</div>
+  </div>
+</header>
+
+<main id="main"></main>
+<div id="toastHost"></div>
+<div id="modalHost"></div>
+
+<script>
+(function(){
+  "use strict";
+
+  // ---------- utilities ----------
+  function uid(){ return Math.random().toString(36).slice(2) + Date.now().toString(36); }
+  function pad2(n){ return String(n).padStart(2,"0"); }
+  function todayStr(){ var d=new Date(); return d.getFullYear()+"-"+pad2(d.getMonth()+1)+"-"+pad2(d.getDate()); }
+  function timeStr(ts){ var d=new Date(ts); return pad2(d.getHours())+":"+pad2(d.getMinutes()); }
+  function dateStr(ts){ var d=new Date(ts); return d.getFullYear()+"-"+pad2(d.getMonth()+1)+"-"+pad2(d.getDate()); }
+  function fmtElapsed(ms){
+    var s = Math.max(0, Math.floor(ms/1000));
+    var h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60;
+    if (h>0) return h+":"+pad2(m)+":"+pad2(sec);
+    return pad2(m)+":"+pad2(sec);
+  }
+  function escapeHtml(str){
+    return String(str==null?"":str).replace(/[&<>"']/g, function(c){
+      return ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c];
+    });
+  }
+  function toast(msg, ms){
+    var host = document.getElementById("toastHost");
+    var el = document.createElement("div");
+    el.className = "toast";
+    el.textContent = msg;
+    host.appendChild(el);
+    setTimeout(function(){ el.remove(); }, ms || 2600);
+  }
+  function lsGet(key, fallback){
+    try { var v = localStorage.getItem(key); return v===null? fallback : v; } catch(e){ return fallback; }
+  }
+  function lsSet(key, val){
+    try { localStorage.setItem(key, val); } catch(e){}
+  }
+
+  // ---------- custom modal (native prompt/confirm are unreliable inside the artifact frame) ----------
+  function closeModal(){
+    document.getElementById("modalHost").innerHTML = "";
+  }
+  function showPromptModal(title, defaultValue, onSave){
+    var host = document.getElementById("modalHost");
+    host.innerHTML =
+      '<div class="modal-overlay" id="modalOverlay">' +
+        '<div class="modal-box">' +
+          '<h3>'+escapeHtml(title)+'</h3>' +
+          '<input type="text" id="modalInput" value="'+escapeHtml(defaultValue||"")+'">' +
+          '<div class="modal-actions">' +
+            '<button class="subtle" id="modalCancel">Cancelar</button>' +
+            '<button class="primary" id="modalSave">Guardar</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    var input = document.getElementById("modalInput");
+    input.focus();
+    input.select();
+    function save(){
+      var val = input.value.trim();
+      closeModal();
+      if (val) onSave(val);
+    }
+    document.getElementById("modalSave").addEventListener("click", save);
+    document.getElementById("modalCancel").addEventListener("click", closeModal);
+    document.getElementById("modalOverlay").addEventListener("click", function(e){ if (e.target.id === "modalOverlay") closeModal(); });
+    input.addEventListener("keydown", function(e){
+      if (e.key === "Enter") save();
+      if (e.key === "Escape") closeModal();
+    });
+  }
+  function showConfirmModal(message, onConfirm){
+    var host = document.getElementById("modalHost");
+    host.innerHTML =
+      '<div class="modal-overlay" id="modalOverlay">' +
+        '<div class="modal-box">' +
+          '<h3>'+escapeHtml(message)+'</h3>' +
+          '<div class="modal-actions">' +
+            '<button class="subtle" id="modalCancel">Cancelar</button>' +
+            '<button class="danger" id="modalOk">Eliminar</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    document.getElementById("modalOk").addEventListener("click", function(){ closeModal(); onConfirm(); });
+    document.getElementById("modalCancel").addEventListener("click", closeModal);
+    document.getElementById("modalOverlay").addEventListener("click", function(e){ if (e.target.id === "modalOverlay") closeModal(); });
+  }
+
+  // ---------- state ----------
+  var db = null;
+  var activeTab = lsGet("station-app:tab", "config");
+  var lines = []; // {id, name}
+  var stations = []; // {id, name, machineCount, periods, machines, records}
+  var selectedLineId = lsGet("station-app:line", "");
+  var configSelectedStationId = null;
+  var stationTabStationId = lsGet("station-app:stationtab-station", "");
+  var unsubStations = null;
+  var pendingWrite = {}; // stationId -> bool, to prevent overlapping writes to same doc
+
+  var clockTimer = null;
+
+  // ---------- boot ----------
+  window.addEventListener("DOMContentLoaded", function(){
+    render();
+    document.querySelectorAll(".tab").forEach(function(t){
+      t.addEventListener("click", function(){
+        activeTab = t.getAttribute("data-tab");
+        lsSet("station-app:tab", activeTab);
+        render();
+      });
+    });
+    document.getElementById("btnNewLine").addEventListener("click", onNewLine);
+    document.getElementById("lineSelect").addEventListener("change", function(e){
+      selectedLineId = e.target.value;
+      lsSet("station-app:line", selectedLineId);
+      configSelectedStationId = null;
+      subscribeStations();
+      render();
+    });
+    initClaude();
+    clockTimer = setInterval(tick, 1000);
+  });
+
+  async function initClaude(){
+    try {
+      if (!window.claude || !window.claude.use) {
+        toast("Este dispositivo no puede conectarse a los datos compartidos.");
+        render();
+        return;
+      }
+      db = await window.claude.use("db");
+    } catch(e){ db = null; }
+    if (!db){
+      toast("No se pudo conectar a la base de datos compartida.");
+      render();
+      return;
+    }
+    subscribeLines();
+  }
+
+  function subscribeLines(){
+    if (!db) return;
+    db.collection("lines").orderBy("order","asc").onSnapshot(function(snap){
+      lines = snap.docs.map(function(d){ var v=d.data(); return {id:d.id, name:v.name}; });
+      if (!selectedLineId && lines.length){
+        selectedLineId = lines[0].id;
+        lsSet("station-app:line", selectedLineId);
+      }
+      if (selectedLineId && !lines.some(function(l){return l.id===selectedLineId;})){
+        selectedLineId = lines.length? lines[0].id : "";
+        lsSet("station-app:line", selectedLineId);
+      }
+      subscribeStations();
+      renderLineSelect();
+      render();
+    }, function(err){
+      toast("Error cargando líneas: " + err.code);
+    });
+  }
+
+  function subscribeStations(){
+    if (unsubStations){ unsubStations(); unsubStations = null; }
+    stations = [];
+    if (!db || !selectedLineId){ render(); return; }
+    unsubStations = db.collection("lines/"+selectedLineId+"/stations").orderBy("order","asc").onSnapshot(function(snap){
+      stations = snap.docs.map(function(d){
+        var v = d.data();
+        return {
+          id: d.id,
+          name: v.name,
+          machineCount: v.machineCount || 1,
+          periods: v.periods || [],
+          machines: v.machines || [],
+          records: v.records || []
+        };
+      });
+      render();
+    }, function(err){
+      toast("Error cargando estaciones: " + err.code);
+    });
+  }
+
+  function tick(){
+    // refresh only the dynamic bits (timers / active period highlight)
+    if (activeTab === "monitor") renderMonitorTimers();
+    if (activeTab === "station") renderStationTimers();
+  }
+
+  // ---------- line CRUD ----------
+  function onNewLine(){
+    showPromptModal("Nombre de la nueva línea de producción", "", function(name){
+      db.collection("lines").add({name:name, order:Date.now()}).then(function(ref){
+        selectedLineId = ref.id;
+        lsSet("station-app:line", selectedLineId);
+      }).catch(function(e){ toast("No se pudo crear la línea"); });
+    });
+  }
+  function renameLine(lineId, oldName){
+    showPromptModal("Nuevo nombre de la línea", oldName, function(name){
+      db.doc("lines/"+lineId).update({name:name}).catch(function(){ toast("No se pudo renombrar"); });
+    });
+  }
+  function deleteLine(lineId, name){
+    showConfirmModal('¿Eliminar la línea "'+name+'"? Esto no se puede deshacer.', function(){
+      db.doc("lines/"+lineId).delete().then(function(){
+        if (selectedLineId === lineId){
+          selectedLineId = "";
+          lsSet("station-app:line","");
+        }
+      }).catch(function(){ toast("No se pudo eliminar"); });
+    });
+  }
+
+  // ---------- station CRUD ----------
+  function onNewStation(){
+    if (!selectedLineId){ toast("Selecciona una línea primero"); return; }
+    showPromptModal("Nombre de la nueva estación", "", function(name){
+      db.collection("lines/"+selectedLineId+"/stations").add({
+        name:name, order:Date.now(), machineCount:2,
+        machines:[{status:"idle",startTime:null},{status:"idle",startTime:null}],
+        periods:[], records:[]
+      }).catch(function(){ toast("No se pudo crear la estación"); });
+    });
+  }
+  function renameStation(stationId, oldName){
+    showPromptModal("Nuevo nombre de la estación", oldName, function(name){
+      db.doc("lines/"+selectedLineId+"/stations/"+stationId).update({name:name}).catch(function(){ toast("No se pudo renombrar"); });
+    });
+  }
+  function deleteStation(stationId, name){
+    showConfirmModal('¿Eliminar la estación "'+name+'"?', function(){
+      db.doc("lines/"+selectedLineId+"/stations/"+stationId).delete().then(function(){
+        if (configSelectedStationId === stationId) configSelectedStationId = null;
+      }).catch(function(){ toast("No se pudo eliminar"); });
+    });
+  }
+  function clearStationRecords(station){
+    showConfirmModal('¿Limpiar el contador de piezas (real) de "'+station.name+'"? Esto borra el historial de unidades procesadas registradas.', function(){
+      db.doc("lines/"+selectedLineId+"/stations/"+station.id).update({records: []})
+        .then(function(){ toast("Contador de piezas reiniciado"); })
+        .catch(function(){ toast("No se pudo limpiar el contador"); });
+    });
+  }
+  function updateMachineCount(station, newCount){
+    newCount = Math.max(1, Math.min(12, parseInt(newCount,10) || 1));
+    var machines = station.machines.slice();
+    if (newCount > machines.length){
+      while (machines.length < newCount) machines.push({status:"idle", startTime:null});
+    } else if (newCount < machines.length){
+      var removable = machines.slice(newCount);
+      var busy = removable.some(function(m){ return m.status === "processing"; });
+      if (busy){ toast("Termina el proceso en las máquinas antes de reducir la cantidad."); return; }
+      machines = machines.slice(0, newCount);
+    }
+    db.doc("lines/"+selectedLineId+"/stations/"+station.id).update({
+      machineCount: newCount, machines: machines
+    }).catch(function(){ toast("No se pudo actualizar"); });
+  }
+
+  // ---------- periods ----------
+  function addPeriod(station){
+    var periods = station.periods.slice();
+    periods.push({id: uid(), start:"08:00", end:"09:00", target:0});
+    db.doc("lines/"+selectedLineId+"/stations/"+station.id).update({periods:periods})
+      .catch(function(){ toast("No se pudo agregar periodo"); });
+  }
+  function updatePeriod(station, periodId, field, value){
+    var periods = station.periods.map(function(p){
+      if (p.id !== periodId) return p;
+      var np = Object.assign({}, p);
+      if (field === "target") np.target = Math.max(0, parseInt(value,10) || 0);
+      else np[field] = value;
+      return np;
+    });
+    db.doc("lines/"+selectedLineId+"/stations/"+station.id).update({periods:periods})
+      .catch(function(){ toast("No se pudo guardar el periodo"); });
+  }
+  function deletePeriod(station, periodId){
+    var periods = station.periods.filter(function(p){ return p.id !== periodId; });
+    db.doc("lines/"+selectedLineId+"/stations/"+station.id).update({periods:periods})
+      .catch(function(){ toast("No se pudo eliminar el periodo"); });
+  }
+
+  // ---------- operator actions ----------
+  function pressReceived(station){
+    if (pendingWrite[station.id]) return;
+    var idleIdx = -1;
+    for (var i=0;i<station.machines.length;i++){ if (station.machines[i].status !== "processing"){ idleIdx = i; break; } }
+    if (idleIdx === -1){
+      toast("⚠️ Todas las máquinas de esta estación están ocupadas. No se puede asignar otra unidad.");
+      return;
+    }
+    var machines = station.machines.slice();
+    machines[idleIdx] = {status:"processing", startTime: Date.now()};
+    pendingWrite[station.id] = true;
+    db.doc("lines/"+selectedLineId+"/stations/"+station.id).update({machines:machines})
+      .then(function(){ toast("✅ Unidad asignada a Máquina "+(idleIdx+1)); })
+      .catch(function(){ toast("No se pudo registrar"); })
+      .finally(function(){ pendingWrite[station.id] = false; });
+  }
+  function pressFinished(station){
+    if (pendingWrite[station.id]) return;
+    var bestIdx = -1, bestStart = Infinity;
+    station.machines.forEach(function(m,i){
+      if (m.status === "processing" && (m.startTime||0) < bestStart){ bestStart = m.startTime||0; bestIdx = i; }
+    });
+    if (bestIdx === -1){
+      toast("No hay ninguna máquina procesando actualmente.");
+      return;
+    }
+    var machines = station.machines.slice();
+    machines[bestIdx] = {status:"idle", startTime:null};
+    var records = station.records.slice();
+    records.push(Date.now());
+    if (records.length > 3000) records = records.slice(records.length-3000);
+    pendingWrite[station.id] = true;
+    db.doc("lines/"+selectedLineId+"/stations/"+station.id).update({machines:machines, records:records})
+      .then(function(){ toast("✅ Unidad terminada en Máquina "+(bestIdx+1)); })
+      .catch(function(){ toast("No se pudo registrar"); })
+      .finally(function(){ pendingWrite[station.id] = false; });
+  }
+
+  // ---------- period stats ----------
+  function activePeriodId(station){
+    var now = timeStr(Date.now());
+    var found = station.periods.find(function(p){ return p.start <= now && now < p.end; });
+    return found ? found.id : null;
+  }
+  function countForPeriod(station, period){
+    var today = todayStr();
+    return station.records.filter(function(ts){
+      return dateStr(ts) === today && period.start <= timeStr(ts) && timeStr(ts) < period.end;
+    }).length;
+  }
+
+  // ---------- rendering ----------
+  function renderLineSelect(){
+    var sel = document.getElementById("lineSelect");
+    if (!lines.length){
+      sel.innerHTML = '<option value="">Sin líneas — crea una</option>';
+      return;
+    }
+    sel.innerHTML = lines.map(function(l){
+      return '<option value="'+l.id+'"'+(l.id===selectedLineId?" selected":"")+'>'+escapeHtml(l.name)+'</option>';
+    }).join("");
+  }
+
+  function render(){
+    document.querySelectorAll(".tab").forEach(function(t){
+      t.classList.toggle("active", t.getAttribute("data-tab")===activeTab);
+    });
+    renderLineSelect();
+    var main = document.getElementById("main");
+    if (!db){
+      main.innerHTML = '<div class="card"><div class="banner">No se pudo conectar a los datos compartidos en este dispositivo. Verifica tu conexión o permisos e intenta recargar la página.</div></div>';
+      return;
+    }
+    if (!lines.length && activeTab !== "config"){
+      main.innerHTML = '<div class="card"><p class="empty">Aún no hay líneas de producción. Ve a <b>Configuración</b> para crear la primera.</p></div>';
+      return;
+    }
+    if (activeTab === "config") renderConfig();
+    else if (activeTab === "monitor") renderMonitor();
+    else renderStationTab();
+  }
+
+  // ----- Configuración -----
+  function renderConfig(){
+    var main = document.getElementById("main");
+    var html = "";
+    html += '<div class="card"><h2>Líneas de producción</h2><div class="inline-list" id="lineList"></div>' +
+            '<div class="add-row"><input type="text" id="newLineInline" placeholder="Nombre de línea nueva"><button class="primary" id="addLineInline">Agregar</button></div></div>';
+
+    if (selectedLineId){
+      html += '<div class="card"><div class="station-header"><h2 style="margin:0">Estaciones de "'+escapeHtml(lineName(selectedLineId))+'"</h2>' +
+              '<button class="ghost" id="addStationBtn">+ Estación</button></div>';
+      if (!stations.length){
+        html += '<p class="empty">Esta línea no tiene estaciones todavía.</p>';
+      } else {
+        html += '<div class="inline-list" id="stationList"></div>';
+      }
+      html += '</div>';
+
+      var st = stations.find(function(s){ return s.id === configSelectedStationId; });
+      if (st){
+        html += renderStationConfigDetail(st);
+      }
+    }
+    main.innerHTML = html;
+
+    // wire events
+    var lineList = document.getElementById("lineList");
+    if (lineList){
+      lineList.innerHTML = lines.map(function(l){
+        return '<div class="list-item'+(l.id===selectedLineId?" selected":"")+'" data-line="'+l.id+'">' +
+               '<span>'+escapeHtml(l.name)+'</span>' +
+               '<span class="actions"><button class="subtle" data-act="rename-line" data-id="'+l.id+'">✏️</button>' +
+               '<button class="danger" data-act="delete-line" data-id="'+l.id+'">🗑️</button></span></div>';
+      }).join("");
+      lineList.querySelectorAll(".list-item").forEach(function(el){
+        el.addEventListener("click", function(e){
+          if (e.target.closest("button")) return;
+          selectedLineId = el.getAttribute("data-line");
+          lsSet("station-app:line", selectedLineId);
+          configSelectedStationId = null;
+          subscribeStations(); render();
+        });
+      });
+      lineList.querySelectorAll('[data-act="rename-line"]').forEach(function(b){
+        b.addEventListener("click", function(){ var l = lines.find(function(x){return x.id===b.getAttribute("data-id");}); renameLine(l.id,l.name); });
+      });
+      lineList.querySelectorAll('[data-act="delete-line"]').forEach(function(b){
+        b.addEventListener("click", function(){ var l = lines.find(function(x){return x.id===b.getAttribute("data-id");}); deleteLine(l.id,l.name); });
+      });
+    }
+    var addLineInlineBtn = document.getElementById("addLineInline");
+    if (addLineInlineBtn){
+      addLineInlineBtn.addEventListener("click", function(){
+        var inp = document.getElementById("newLineInline");
+        var name = inp.value.trim();
+        if (!name) return;
+        db.collection("lines").add({name:name, order:Date.now()}).then(function(ref){
+          selectedLineId = ref.id; lsSet("station-app:line", selectedLineId); inp.value="";
+        }).catch(function(){ toast("No se pudo crear la línea"); });
+      });
+    }
+    var addStationBtn = document.getElementById("addStationBtn");
+    if (addStationBtn) addStationBtn.addEventListener("click", onNewStation);
+
+    var stationList = document.getElementById("stationList");
+    if (stationList){
+      stationList.innerHTML = stations.map(function(s){
+        return '<div class="list-item'+(s.id===configSelectedStationId?" selected":"")+'" data-st="'+s.id+'">' +
+               '<span>'+escapeHtml(s.name)+' <span class="muted">('+s.machineCount+' máquinas)</span></span>' +
+               '<span class="actions"><button class="subtle" data-act="rename-st" data-id="'+s.id+'">✏️</button>' +
+               '<button class="danger" data-act="delete-st" data-id="'+s.id+'">🗑️</button></span></div>';
+      }).join("");
+      stationList.querySelectorAll(".list-item").forEach(function(el){
+        el.addEventListener("click", function(e){
+          if (e.target.closest("button")) return;
+          configSelectedStationId = el.getAttribute("data-st");
+          render();
+        });
+      });
+      stationList.querySelectorAll('[data-act="rename-st"]').forEach(function(b){
+        b.addEventListener("click", function(){ var s=stations.find(function(x){return x.id===b.getAttribute("data-id");}); renameStation(s.id,s.name); });
+      });
+      stationList.querySelectorAll('[data-act="delete-st"]').forEach(function(b){
+        b.addEventListener("click", function(){ var s=stations.find(function(x){return x.id===b.getAttribute("data-id");}); deleteStation(s.id,s.name); });
+      });
+    }
+
+    wireStationConfigDetailEvents();
+  }
+
+  function lineName(id){
+    var l = lines.find(function(x){return x.id===id;});
+    return l ? l.name : "";
+  }
+
+  function renderStationConfigDetail(st){
+    var html = '<div class="card" id="stationDetailCard">';
+    html += '<h2>Detalle: '+escapeHtml(st.name)+'</h2>';
+    html += '<div class="rowline"><label class="muted">Cantidad de máquinas:</label>' +
+            '<input type="number" min="1" max="12" id="machineCountInput" value="'+st.machineCount+'" style="width:70px"></div>';
+    html += '<div class="section-title">Periodos de tiempo y metas</div>';
+    html += '<div id="periodsEditor">';
+    if (!st.periods.length){
+      html += '<p class="muted">No hay periodos definidos aún.</p>';
+    } else {
+      st.periods.forEach(function(p){
+        html += '<div class="period-row" data-pid="'+p.id+'">' +
+          '<input type="time" class="p-start" value="'+p.start+'"> a ' +
+          '<input type="time" class="p-end" value="'+p.end+'"> · Meta: ' +
+          '<input type="number" min="0" class="p-target" value="'+p.target+'" style="width:70px">' +
+          '<button class="danger p-del">🗑️</button></div>';
+      });
+    }
+    html += '</div>';
+    html += '<button class="ghost" id="addPeriodBtn">+ Agregar periodo</button>';
+    html += '<div class="section-title">Contador de piezas</div>';
+    html += '<button class="danger" id="clearRecordsBtn">🧹 Limpiar contador de piezas (real)</button>';
+    html += '</div>';
+    return html;
+  }
+
+  function wireStationConfigDetailEvents(){
+    var st = stations.find(function(s){ return s.id === configSelectedStationId; });
+    if (!st) return;
+    var mc = document.getElementById("machineCountInput");
+    if (mc){
+      mc.addEventListener("change", function(){ updateMachineCount(st, mc.value); });
+    }
+    var addP = document.getElementById("addPeriodBtn");
+    if (addP) addP.addEventListener("click", function(){ addPeriod(st); });
+    var clearBtn = document.getElementById("clearRecordsBtn");
+    if (clearBtn) clearBtn.addEventListener("click", function(){ clearStationRecords(st); });
+
+    document.querySelectorAll(".period-row").forEach(function(row){
+      var pid = row.getAttribute("data-pid");
+      row.querySelector(".p-start").addEventListener("change", function(e){ updatePeriod(st,pid,"start",e.target.value); });
+      row.querySelector(".p-end").addEventListener("change", function(e){ updatePeriod(st,pid,"end",e.target.value); });
+      row.querySelector(".p-target").addEventListener("change", function(e){ updatePeriod(st,pid,"target",e.target.value); });
+      row.querySelector(".p-del").addEventListener("click", function(){ deletePeriod(st,pid); });
+    });
+  }
+
+  // ----- Monitor -----
+  function renderMonitor(){
+    var main = document.getElementById("main");
+    if (!stations.length){
+      main.innerHTML = '<div class="card"><p class="empty">Esta línea no tiene estaciones configuradas.</p></div>';
+      return;
+    }
+    var html = "";
+    stations.forEach(function(s){
+      html += '<div class="card" id="mon-'+s.id+'">';
+      html += '<div class="station-header"><h3>'+escapeHtml(s.name)+'</h3>' +
+              '<span class="rowline"><span class="muted">'+s.machineCount+' máquinas</span>' +
+              '<button class="subtle mon-clear-btn" data-st="'+s.id+'" style="padding:4px 8px;font-size:12px">🧹 Reiniciar real</button></span></div>';
+      html += '<div class="machine-grid">';
+      s.machines.forEach(function(m, idx){
+        var busy = m.status === "processing";
+        html += '<div class="machine-slot '+(busy?"busy":"idle")+'" data-machine="'+idx+'" data-start="'+(m.startTime||"")+'">' +
+                '<div>Máquina '+(idx+1)+'</div>' +
+                '<div class="timer">'+(busy? fmtElapsed(Date.now()-m.startTime) : "Libre")+'</div></div>';
+      });
+      html += '</div>';
+      html += renderPeriodsTable(s);
+      html += '</div>';
+    });
+    main.innerHTML = html;
+    main.querySelectorAll(".mon-clear-btn").forEach(function(b){
+      b.addEventListener("click", function(){
+        var s = stations.find(function(x){ return x.id === b.getAttribute("data-st"); });
+        if (s) clearStationRecords(s);
+      });
+    });
+  }
+  function renderPeriodsTable(s){
+    if (!s.periods.length) return '<p class="muted">Sin periodos configurados para esta estación.</p>';
+    var activeId = activePeriodId(s);
+    var html = '<table><thead><tr><th>Periodo</th><th>Meta</th><th>Real</th><th>Eficiencia</th></tr></thead><tbody>';
+    s.periods.slice().sort(function(a,b){ return a.start.localeCompare(b.start); }).forEach(function(p){
+      var count = countForPeriod(s,p);
+      var eff = p.target>0 ? Math.round((count/p.target)*100) : null;
+      var effClass = eff===null? "" : (eff>=100?"eff-good": eff>=70?"eff-mid":"eff-bad");
+      html += '<tr class="'+(p.id===activeId?"active-period":"")+'">' +
+              '<td>'+p.start+'–'+p.end+(p.id===activeId?' ⏱':'')+'</td>' +
+              '<td>'+p.target+'</td><td>'+count+'</td>' +
+              '<td class="'+effClass+'">'+(eff===null?"–":eff+"%")+'</td></tr>';
+    });
+    html += '</tbody></table>';
+    return html;
+  }
+  function renderMonitorTimers(){
+    if (activeTab !== "monitor") return;
+    stations.forEach(function(s){
+      var card = document.getElementById("mon-"+s.id);
+      if (!card) return;
+      s.machines.forEach(function(m, idx){
+        var slot = card.querySelector('.machine-slot[data-machine="'+idx+'"] .timer');
+        if (slot && m.status === "processing"){ slot.textContent = fmtElapsed(Date.now()-m.startTime); }
+      });
+      // refresh active-period highlighting / counts without full re-render churn
+      var table = card.querySelectorAll("table tr");
+      // cheap approach: just re-render periods table region if present
+      var oldTable = card.querySelector("table");
+      if (oldTable){
+        var wrapper = document.createElement("div");
+        wrapper.innerHTML = renderPeriodsTable(s);
+        oldTable.replaceWith(wrapper.firstElementChild);
+      }
+    });
+  }
+
+  // ----- Estación (operador) -----
+  function renderStationTab(){
+    var main = document.getElementById("main");
+    var html = '<div class="card"><div class="rowline"><label class="muted">Estación:</label>' +
+      '<select id="stationTabSelect"></select></div></div>';
+    var st = stations.find(function(s){ return s.id === stationTabStationId; });
+    if (!stations.length){
+      html += '<div class="card"><p class="empty">Esta línea no tiene estaciones configuradas.</p></div>';
+    } else if (!st){
+      html += '<div class="card"><p class="empty">Selecciona una estación arriba.</p></div>';
+    } else {
+      html += '<div class="card" id="stTabCard">';
+      html += '<h2>'+escapeHtml(st.name)+'</h2>';
+      html += '<div class="machine-grid">';
+      st.machines.forEach(function(m, idx){
+        var busy = m.status === "processing";
+        html += '<div class="machine-slot '+(busy?"busy":"idle")+'" data-machine="'+idx+'">' +
+                '<div>Máquina '+(idx+1)+'</div>' +
+                '<div class="timer">'+(busy? fmtElapsed(Date.now()-m.startTime) : "Libre")+'</div></div>';
+      });
+      html += '</div>';
+      html += '<div class="big-btns">' +
+              '<button class="big-btn start" id="btnReceived">📥 Unidad recibida</button>' +
+              '<button class="big-btn finish" id="btnFinished">✅ Unidad terminada</button>' +
+              '</div>';
+      html += '</div>';
+    }
+    main.innerHTML = html;
+
+    var sel = document.getElementById("stationTabSelect");
+    sel.innerHTML = stations.length
+      ? stations.map(function(s){ return '<option value="'+s.id+'"'+(s.id===stationTabStationId?" selected":"")+'>'+escapeHtml(s.name)+'</option>'; }).join("")
+      : '<option value="">Sin estaciones</option>';
+    sel.addEventListener("change", function(e){
+      stationTabStationId = e.target.value;
+      lsSet("station-app:stationtab-station", stationTabStationId);
+      render();
+    });
+
+    var btnR = document.getElementById("btnReceived");
+    var btnF = document.getElementById("btnFinished");
+    if (btnR) btnR.addEventListener("click", function(){ pressReceived(st); });
+    if (btnF) btnF.addEventListener("click", function(){ pressFinished(st); });
+  }
+  function renderStationTimers(){
+    if (activeTab !== "station") return;
+    var st = stations.find(function(s){ return s.id === stationTabStationId; });
+    var card = document.getElementById("stTabCard");
+    if (!st || !card) return;
+    st.machines.forEach(function(m, idx){
+      var slot = card.querySelector('.machine-slot[data-machine="'+idx+'"] .timer');
+      if (slot && m.status === "processing"){ slot.textContent = fmtElapsed(Date.now()-m.startTime); }
+    });
+  }
+
+})();
+</script>
+</body>
+</html>
