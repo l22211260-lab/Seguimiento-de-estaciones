@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Seguimiento de Estaciones</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <style>
   :root{
     --bg: #f4f5f7;
@@ -261,15 +262,25 @@
     document.getElementById("modalOverlay").addEventListener("click", function(e){ if (e.target.id === "modalOverlay") closeModal(); });
   }
 
+  // =====================================================================
+  // CONFIGURACIÓN DE BASE DE DATOS (Supabase)
+  // 1. Crea un proyecto gratis en https://supabase.com
+  // 2. Ejecuta el SQL que te di aparte (tablas "lines" y "stations")
+  // 3. Ve a Project Settings → API y copia aquí tu Project URL y tu anon/public key
+  // =====================================================================
+  var SUPABASE_URL = "https://TU-PROYECTO.supabase.co";
+  var SUPABASE_ANON_KEY = "TU-ANON-KEY-PUBLICA";
+  // =====================================================================
+
   // ---------- state ----------
-  var db = null;
+  var supa = null;
   var activeTab = lsGet("station-app:tab", "config");
   var lines = []; // {id, name}
   var stations = []; // {id, name, machineCount, periods, machines, records}
   var selectedLineId = lsGet("station-app:line", "");
   var configSelectedStationId = null;
   var stationTabStationId = lsGet("station-app:stationtab-station", "");
-  var unsubStations = null;
+  var stationsChannel = null;
   var pendingWrite = {}; // stationId -> bool, to prevent overlapping writes to same doc
 
   var clockTimer = null;
@@ -292,67 +303,79 @@
       subscribeStations();
       render();
     });
-    initClaude();
+    initDb();
     clockTimer = setInterval(tick, 1000);
   });
 
-  async function initClaude(){
+  function initDb(){
     try {
-      if (!window.claude || !window.claude.use) {
-        toast("Este dispositivo no puede conectarse a los datos compartidos.");
+      if (!window.supabase || !window.supabase.createClient){
+        toast("No se cargó la librería de Supabase (revisa tu conexión a internet).");
         render();
         return;
       }
-      db = await window.claude.use("db");
-    } catch(e){ db = null; }
-    if (!db){
-      toast("No se pudo conectar a la base de datos compartida.");
-      render();
-      return;
-    }
+      if (!SUPABASE_URL || SUPABASE_URL.indexOf("TU-PROYECTO") !== -1 || !SUPABASE_ANON_KEY || SUPABASE_ANON_KEY.indexOf("TU-ANON-KEY") !== -1){
+        toast("Falta configurar SUPABASE_URL y SUPABASE_ANON_KEY en el código.");
+        render();
+        return;
+      }
+      supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    } catch(e){ supa = null; }
+    if (!supa){ render(); return; }
     subscribeLines();
   }
 
+  function mapStationRow(r){
+    return {
+      id: r.id,
+      name: r.name,
+      machineCount: r.machine_count || 1,
+      periods: r.periods || [],
+      machines: r.machines || [],
+      records: r.records || []
+    };
+  }
+
   function subscribeLines(){
-    if (!db) return;
-    db.collection("lines").orderBy("order","asc").onSnapshot(function(snap){
-      lines = snap.docs.map(function(d){ var v=d.data(); return {id:d.id, name:v.name}; });
-      if (!selectedLineId && lines.length){
-        selectedLineId = lines[0].id;
-        lsSet("station-app:line", selectedLineId);
-      }
-      if (selectedLineId && !lines.some(function(l){return l.id===selectedLineId;})){
-        selectedLineId = lines.length? lines[0].id : "";
-        lsSet("station-app:line", selectedLineId);
-      }
-      subscribeStations();
-      renderLineSelect();
-      render();
-    }, function(err){
-      toast("Error cargando líneas: " + err.code);
-    });
+    if (!supa) return;
+    function load(){
+      supa.from("lines").select("*").order("created_at",{ascending:true}).then(function(res){
+        if (res.error){ toast("Error cargando líneas: " + res.error.message); return; }
+        lines = res.data.map(function(r){ return {id:r.id, name:r.name}; });
+        if (!selectedLineId && lines.length){
+          selectedLineId = lines[0].id;
+          lsSet("station-app:line", selectedLineId);
+        }
+        if (selectedLineId && !lines.some(function(l){return l.id===selectedLineId;})){
+          selectedLineId = lines.length? lines[0].id : "";
+          lsSet("station-app:line", selectedLineId);
+        }
+        subscribeStations();
+        renderLineSelect();
+        render();
+      });
+    }
+    load();
+    supa.channel("lines-changes")
+      .on("postgres_changes", {event:"*", schema:"public", table:"lines"}, load)
+      .subscribe();
   }
 
   function subscribeStations(){
-    if (unsubStations){ unsubStations(); unsubStations = null; }
+    if (stationsChannel){ supa.removeChannel(stationsChannel); stationsChannel = null; }
     stations = [];
-    if (!db || !selectedLineId){ render(); return; }
-    unsubStations = db.collection("lines/"+selectedLineId+"/stations").orderBy("order","asc").onSnapshot(function(snap){
-      stations = snap.docs.map(function(d){
-        var v = d.data();
-        return {
-          id: d.id,
-          name: v.name,
-          machineCount: v.machineCount || 1,
-          periods: v.periods || [],
-          machines: v.machines || [],
-          records: v.records || []
-        };
+    if (!supa || !selectedLineId){ render(); return; }
+    function load(){
+      supa.from("stations").select("*").eq("line_id", selectedLineId).order("created_at",{ascending:true}).then(function(res){
+        if (res.error){ toast("Error cargando estaciones: " + res.error.message); return; }
+        stations = res.data.map(mapStationRow);
+        render();
       });
-      render();
-    }, function(err){
-      toast("Error cargando estaciones: " + err.code);
-    });
+    }
+    load();
+    stationsChannel = supa.channel("stations-changes-"+selectedLineId)
+      .on("postgres_changes", {event:"*", schema:"public", table:"stations", filter:"line_id=eq."+selectedLineId}, load)
+      .subscribe();
   }
 
   function tick(){
@@ -364,25 +387,29 @@
   // ---------- line CRUD ----------
   function onNewLine(){
     showPromptModal("Nombre de la nueva línea de producción", "", function(name){
-      db.collection("lines").add({name:name, order:Date.now()}).then(function(ref){
-        selectedLineId = ref.id;
+      supa.from("lines").insert({name:name}).select().single().then(function(res){
+        if (res.error){ toast("No se pudo crear la línea"); return; }
+        selectedLineId = res.data.id;
         lsSet("station-app:line", selectedLineId);
-      }).catch(function(e){ toast("No se pudo crear la línea"); });
+      });
     });
   }
   function renameLine(lineId, oldName){
     showPromptModal("Nuevo nombre de la línea", oldName, function(name){
-      db.doc("lines/"+lineId).update({name:name}).catch(function(){ toast("No se pudo renombrar"); });
+      supa.from("lines").update({name:name}).eq("id", lineId).then(function(res){
+        if (res.error) toast("No se pudo renombrar");
+      });
     });
   }
   function deleteLine(lineId, name){
     showConfirmModal('¿Eliminar la línea "'+name+'"? Esto no se puede deshacer.', function(){
-      db.doc("lines/"+lineId).delete().then(function(){
+      supa.from("lines").delete().eq("id", lineId).then(function(res){
+        if (res.error){ toast("No se pudo eliminar"); return; }
         if (selectedLineId === lineId){
           selectedLineId = "";
           lsSet("station-app:line","");
         }
-      }).catch(function(){ toast("No se pudo eliminar"); });
+      });
     });
   }
 
@@ -390,30 +417,36 @@
   function onNewStation(){
     if (!selectedLineId){ toast("Selecciona una línea primero"); return; }
     showPromptModal("Nombre de la nueva estación", "", function(name){
-      db.collection("lines/"+selectedLineId+"/stations").add({
-        name:name, order:Date.now(), machineCount:2,
+      supa.from("stations").insert({
+        line_id: selectedLineId, name:name, machine_count:2,
         machines:[{status:"idle",startTime:null},{status:"idle",startTime:null}],
         periods:[], records:[]
-      }).catch(function(){ toast("No se pudo crear la estación"); });
+      }).then(function(res){
+        if (res.error) toast("No se pudo crear la estación");
+      });
     });
   }
   function renameStation(stationId, oldName){
     showPromptModal("Nuevo nombre de la estación", oldName, function(name){
-      db.doc("lines/"+selectedLineId+"/stations/"+stationId).update({name:name}).catch(function(){ toast("No se pudo renombrar"); });
+      supa.from("stations").update({name:name}).eq("id", stationId).then(function(res){
+        if (res.error) toast("No se pudo renombrar");
+      });
     });
   }
   function deleteStation(stationId, name){
     showConfirmModal('¿Eliminar la estación "'+name+'"?', function(){
-      db.doc("lines/"+selectedLineId+"/stations/"+stationId).delete().then(function(){
+      supa.from("stations").delete().eq("id", stationId).then(function(res){
+        if (res.error){ toast("No se pudo eliminar"); return; }
         if (configSelectedStationId === stationId) configSelectedStationId = null;
-      }).catch(function(){ toast("No se pudo eliminar"); });
+      });
     });
   }
   function clearStationRecords(station){
     showConfirmModal('¿Limpiar el contador de piezas (real) de "'+station.name+'"? Esto borra el historial de unidades procesadas registradas.', function(){
-      db.doc("lines/"+selectedLineId+"/stations/"+station.id).update({records: []})
-        .then(function(){ toast("Contador de piezas reiniciado"); })
-        .catch(function(){ toast("No se pudo limpiar el contador"); });
+      supa.from("stations").update({records: []}).eq("id", station.id).then(function(res){
+        if (res.error){ toast("No se pudo limpiar el contador"); return; }
+        toast("Contador de piezas reiniciado");
+      });
     });
   }
   function updateMachineCount(station, newCount){
@@ -427,17 +460,18 @@
       if (busy){ toast("Termina el proceso en las máquinas antes de reducir la cantidad."); return; }
       machines = machines.slice(0, newCount);
     }
-    db.doc("lines/"+selectedLineId+"/stations/"+station.id).update({
-      machineCount: newCount, machines: machines
-    }).catch(function(){ toast("No se pudo actualizar"); });
+    supa.from("stations").update({machine_count: newCount, machines: machines}).eq("id", station.id).then(function(res){
+      if (res.error) toast("No se pudo actualizar");
+    });
   }
 
   // ---------- periods ----------
   function addPeriod(station){
     var periods = station.periods.slice();
     periods.push({id: uid(), start:"08:00", end:"09:00", target:0});
-    db.doc("lines/"+selectedLineId+"/stations/"+station.id).update({periods:periods})
-      .catch(function(){ toast("No se pudo agregar periodo"); });
+    supa.from("stations").update({periods:periods}).eq("id", station.id).then(function(res){
+      if (res.error) toast("No se pudo agregar periodo");
+    });
   }
   function updatePeriod(station, periodId, field, value){
     var periods = station.periods.map(function(p){
@@ -447,13 +481,15 @@
       else np[field] = value;
       return np;
     });
-    db.doc("lines/"+selectedLineId+"/stations/"+station.id).update({periods:periods})
-      .catch(function(){ toast("No se pudo guardar el periodo"); });
+    supa.from("stations").update({periods:periods}).eq("id", station.id).then(function(res){
+      if (res.error) toast("No se pudo guardar el periodo");
+    });
   }
   function deletePeriod(station, periodId){
     var periods = station.periods.filter(function(p){ return p.id !== periodId; });
-    db.doc("lines/"+selectedLineId+"/stations/"+station.id).update({periods:periods})
-      .catch(function(){ toast("No se pudo eliminar el periodo"); });
+    supa.from("stations").update({periods:periods}).eq("id", station.id).then(function(res){
+      if (res.error) toast("No se pudo eliminar el periodo");
+    });
   }
 
   // ---------- operator actions ----------
@@ -468,10 +504,11 @@
     var machines = station.machines.slice();
     machines[idleIdx] = {status:"processing", startTime: Date.now()};
     pendingWrite[station.id] = true;
-    db.doc("lines/"+selectedLineId+"/stations/"+station.id).update({machines:machines})
-      .then(function(){ toast("✅ Unidad asignada a Máquina "+(idleIdx+1)); })
-      .catch(function(){ toast("No se pudo registrar"); })
-      .finally(function(){ pendingWrite[station.id] = false; });
+    supa.from("stations").update({machines:machines}).eq("id", station.id).then(function(res){
+      pendingWrite[station.id] = false;
+      if (res.error){ toast("No se pudo registrar"); return; }
+      toast("✅ Unidad asignada a Máquina "+(idleIdx+1));
+    });
   }
   function pressFinished(station){
     if (pendingWrite[station.id]) return;
@@ -489,10 +526,11 @@
     records.push(Date.now());
     if (records.length > 3000) records = records.slice(records.length-3000);
     pendingWrite[station.id] = true;
-    db.doc("lines/"+selectedLineId+"/stations/"+station.id).update({machines:machines, records:records})
-      .then(function(){ toast("✅ Unidad terminada en Máquina "+(bestIdx+1)); })
-      .catch(function(){ toast("No se pudo registrar"); })
-      .finally(function(){ pendingWrite[station.id] = false; });
+    supa.from("stations").update({machines:machines, records:records}).eq("id", station.id).then(function(res){
+      pendingWrite[station.id] = false;
+      if (res.error){ toast("No se pudo registrar"); return; }
+      toast("✅ Unidad terminada en Máquina "+(bestIdx+1));
+    });
   }
 
   // ---------- period stats ----------
@@ -526,7 +564,7 @@
     });
     renderLineSelect();
     var main = document.getElementById("main");
-    if (!db){
+    if (!supa){
       main.innerHTML = '<div class="card"><div class="banner">No se pudo conectar a los datos compartidos en este dispositivo. Verifica tu conexión o permisos e intenta recargar la página.</div></div>';
       return;
     }
@@ -594,9 +632,10 @@
         var inp = document.getElementById("newLineInline");
         var name = inp.value.trim();
         if (!name) return;
-        db.collection("lines").add({name:name, order:Date.now()}).then(function(ref){
-          selectedLineId = ref.id; lsSet("station-app:line", selectedLineId); inp.value="";
-        }).catch(function(){ toast("No se pudo crear la línea"); });
+        supa.from("lines").insert({name:name}).select().single().then(function(res){
+          if (res.error){ toast("No se pudo crear la línea"); return; }
+          selectedLineId = res.data.id; lsSet("station-app:line", selectedLineId); inp.value="";
+        });
       });
     }
     var addStationBtn = document.getElementById("addStationBtn");
