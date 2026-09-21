@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Seguimiento de Estaciones</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
   :root{
     --bg: #f4f5f7;
@@ -546,6 +547,58 @@
     }).length;
   }
 
+  // ---------- exportar a Excel ----------
+  function safeFileNamePart(name){
+    // caracteres no permitidos en nombres de archivo en Windows/Mac/Linux
+    return String(name).replace(/[\\\/:\*\?"<>\|]/g, " ").trim();
+  }
+  function safeSheetName(name){
+    // Excel: máximo 31 caracteres, sin \ / ? * [ ] :
+    var clean = String(name).replace(/[\\\/\?\*\[\]:]/g, " ").trim();
+    return clean.slice(0, 31) || "Estación";
+  }
+  function periodRowsForSheet(station){
+    var periodsSorted = station.periods.slice().sort(function(a,b){ return a.start.localeCompare(b.start); });
+    return periodsSorted.map(function(p){
+      var count = countForPeriod(station, p);
+      var prod = p.target>0 ? Math.round((count/p.target)*100) : null;
+      return {
+        "Periodo": p.start+"–"+p.end,
+        "Meta": p.target,
+        "Real": count,
+        "Productividad (%)": prod===null? "" : prod
+      };
+    });
+  }
+  function exportStationToExcel(station){
+    if (!window.XLSX){ toast("No se pudo cargar la librería de Excel."); return; }
+    var rows = periodRowsForSheet(station);
+    if (!rows.length){ toast("Esta estación no tiene periodos configurados para exportar."); return; }
+    var ws = XLSX.utils.json_to_sheet(rows);
+    var wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, safeSheetName(station.name));
+    var fname = safeFileNamePart(lineName(selectedLineId))+", "+safeFileNamePart(station.name)+", "+todayStr()+".xlsx";
+    XLSX.writeFile(wb, fname);
+  }
+  function exportLineToExcel(){
+    if (!window.XLSX){ toast("No se pudo cargar la librería de Excel."); return; }
+    if (!stations.length){ toast("Esta línea no tiene estaciones para exportar."); return; }
+    var wb = XLSX.utils.book_new();
+    var usedNames = {};
+    stations.forEach(function(s){
+      var rows = periodRowsForSheet(s);
+      var ws = XLSX.utils.json_to_sheet(rows.length? rows : [{"Periodo":"", "Meta":"", "Real":"", "Productividad (%)":""}]);
+      var base = safeSheetName(s.name);
+      var name = base;
+      var n = 2;
+      while (usedNames[name]){ name = safeSheetName(base+" "+n); n++; }
+      usedNames[name] = true;
+      XLSX.utils.book_append_sheet(wb, ws, name);
+    });
+    var fname = safeFileNamePart(lineName(selectedLineId))+", Todas las estaciones, "+todayStr()+".xlsx";
+    XLSX.writeFile(wb, fname);
+  }
+
   // ---------- rendering ----------
   function renderLineSelect(){
     var sel = document.getElementById("lineSelect");
@@ -726,11 +779,15 @@
       main.innerHTML = '<div class="card"><p class="empty">Esta línea no tiene estaciones configuradas.</p></div>';
       return;
     }
-    var html = "";
+    var html = '<div class="card"><div class="station-header">' +
+                '<h2 style="margin:0">'+escapeHtml(lineName(selectedLineId))+'</h2>' +
+                '<button class="ghost" id="exportLineBtn">📥 Descargar Excel (toda la línea)</button>' +
+                '</div></div>';
     stations.forEach(function(s){
       html += '<div class="card" id="mon-'+s.id+'">';
       html += '<div class="station-header"><h3>'+escapeHtml(s.name)+'</h3>' +
               '<span class="rowline"><span class="muted">'+s.machineCount+' máquinas</span>' +
+              '<button class="subtle mon-export-btn" data-st="'+s.id+'" style="padding:4px 8px;font-size:12px">📥 Excel</button>' +
               '<button class="subtle mon-clear-btn" data-st="'+s.id+'" style="padding:4px 8px;font-size:12px">🧹 Reiniciar real</button></span></div>';
       html += '<div class="machine-grid">';
       s.machines.forEach(function(m, idx){
@@ -750,11 +807,19 @@
         if (s) clearStationRecords(s);
       });
     });
+    main.querySelectorAll(".mon-export-btn").forEach(function(b){
+      b.addEventListener("click", function(){
+        var s = stations.find(function(x){ return x.id === b.getAttribute("data-st"); });
+        if (s) exportStationToExcel(s);
+      });
+    });
+    var exportLineBtn = document.getElementById("exportLineBtn");
+    if (exportLineBtn) exportLineBtn.addEventListener("click", exportLineToExcel);
   }
   function renderPeriodsTable(s){
     if (!s.periods.length) return '<p class="muted">Sin periodos configurados para esta estación.</p>';
     var activeId = activePeriodId(s);
-    var html = '<table><thead><tr><th>Periodo</th><th>Meta</th><th>Real</th><th>Eficiencia</th></tr></thead><tbody>';
+    var html = '<table><thead><tr><th>Periodo</th><th>Meta</th><th>Real</th><th>Productividad</th></tr></thead><tbody>';
     s.periods.slice().sort(function(a,b){ return a.start.localeCompare(b.start); }).forEach(function(p){
       var count = countForPeriod(s,p);
       var eff = p.target>0 ? Math.round((count/p.target)*100) : null;
