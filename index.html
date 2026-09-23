@@ -330,6 +330,7 @@
     return {
       id: r.id,
       name: r.name,
+      type: r.station_type || "machine", // "machine" o "unit"
       machineCount: r.machine_count || 1,
       periods: r.periods || [],
       machines: r.machines || [],
@@ -419,7 +420,7 @@
     if (!selectedLineId){ toast("Selecciona una línea primero"); return; }
     showPromptModal("Nombre de la nueva estación", "", function(name){
       supa.from("stations").insert({
-        line_id: selectedLineId, name:name, machine_count:2,
+        line_id: selectedLineId, name:name, station_type:"machine", machine_count:2,
         machines:[{status:"idle",startTime:null},{status:"idle",startTime:null}],
         periods:[], records:[]
       }).then(function(res){
@@ -463,6 +464,12 @@
     }
     supa.from("stations").update({machine_count: newCount, machines: machines}).eq("id", station.id).then(function(res){
       if (res.error) toast("No se pudo actualizar");
+    });
+  }
+  function updateStationType(station, newType){
+    if (newType !== "machine" && newType !== "unit") return;
+    supa.from("stations").update({station_type: newType}).eq("id", station.id).then(function(res){
+      if (res.error) toast("No se pudo actualizar el tipo de estación");
     });
   }
 
@@ -531,6 +538,18 @@
       pendingWrite[station.id] = false;
       if (res.error){ toast("No se pudo registrar"); return; }
       toast("✅ Unidad terminada en Máquina "+(bestIdx+1));
+    });
+  }
+  function pressMarkUnit(station){
+    if (pendingWrite[station.id]) return;
+    var records = station.records.slice();
+    records.push(Date.now());
+    if (records.length > 3000) records = records.slice(records.length-3000);
+    pendingWrite[station.id] = true;
+    supa.from("stations").update({records:records}).eq("id", station.id).then(function(res){
+      pendingWrite[station.id] = false;
+      if (res.error){ toast("No se pudo registrar"); return; }
+      toast("✅ Unidad registrada");
     });
   }
 
@@ -728,8 +747,15 @@
   function renderStationConfigDetail(st){
     var html = '<div class="card" id="stationDetailCard">';
     html += '<h2>Detalle: '+escapeHtml(st.name)+'</h2>';
-    html += '<div class="rowline"><label class="muted">Cantidad de máquinas:</label>' +
-            '<input type="number" min="1" max="12" id="machineCountInput" value="'+st.machineCount+'" style="width:70px"></div>';
+    html += '<div class="rowline"><label class="muted">Tipo de estación:</label>' +
+            '<select id="stationTypeInput">' +
+            '<option value="machine"'+(st.type==="machine"?" selected":"")+'>Máquina (procesa por lote, con cronómetro)</option>' +
+            '<option value="unit"'+(st.type==="unit"?" selected":"")+'>Unidad (marca una por una, sin cronómetro)</option>' +
+            '</select></div>';
+    if (st.type === "machine"){
+      html += '<div class="rowline" style="margin-top:8px"><label class="muted">Cantidad de máquinas:</label>' +
+              '<input type="number" min="1" max="12" id="machineCountInput" value="'+st.machineCount+'" style="width:70px"></div>';
+    }
     html += '<div class="section-title">Periodos de tiempo y metas</div>';
     html += '<div id="periodsEditor">';
     if (!st.periods.length){
@@ -754,6 +780,10 @@
   function wireStationConfigDetailEvents(){
     var st = stations.find(function(s){ return s.id === configSelectedStationId; });
     if (!st) return;
+    var typeSel = document.getElementById("stationTypeInput");
+    if (typeSel){
+      typeSel.addEventListener("change", function(){ updateStationType(st, typeSel.value); });
+    }
     var mc = document.getElementById("machineCountInput");
     if (mc){
       mc.addEventListener("change", function(){ updateMachineCount(st, mc.value); });
@@ -786,17 +816,20 @@
     stations.forEach(function(s){
       html += '<div class="card" id="mon-'+s.id+'">';
       html += '<div class="station-header"><h3>'+escapeHtml(s.name)+'</h3>' +
-              '<span class="rowline"><span class="muted">'+s.machineCount+' máquinas</span>' +
+              '<span class="rowline">' +
+              (s.type==="machine" ? '<span class="muted">'+s.machineCount+' máquinas</span>' : '<span class="muted">Por unidad</span>') +
               '<button class="subtle mon-export-btn" data-st="'+s.id+'" style="padding:4px 8px;font-size:12px">📥 Excel</button>' +
               '<button class="subtle mon-clear-btn" data-st="'+s.id+'" style="padding:4px 8px;font-size:12px">🧹 Reiniciar real</button></span></div>';
-      html += '<div class="machine-grid">';
-      s.machines.forEach(function(m, idx){
-        var busy = m.status === "processing";
-        html += '<div class="machine-slot '+(busy?"busy":"idle")+'" data-machine="'+idx+'" data-start="'+(m.startTime||"")+'">' +
-                '<div>Máquina '+(idx+1)+'</div>' +
-                '<div class="timer">'+(busy? fmtElapsed(Date.now()-m.startTime) : "Libre")+'</div></div>';
-      });
-      html += '</div>';
+      if (s.type === "machine"){
+        html += '<div class="machine-grid">';
+        s.machines.forEach(function(m, idx){
+          var busy = m.status === "processing";
+          html += '<div class="machine-slot '+(busy?"busy":"idle")+'" data-machine="'+idx+'" data-start="'+(m.startTime||"")+'">' +
+                  '<div>Máquina '+(idx+1)+'</div>' +
+                  '<div class="timer">'+(busy? fmtElapsed(Date.now()-m.startTime) : "Libre")+'</div></div>';
+        });
+        html += '</div>';
+      }
       html += renderPeriodsTable(s);
       html += '</div>';
     });
@@ -837,10 +870,12 @@
     stations.forEach(function(s){
       var card = document.getElementById("mon-"+s.id);
       if (!card) return;
-      s.machines.forEach(function(m, idx){
-        var slot = card.querySelector('.machine-slot[data-machine="'+idx+'"] .timer');
-        if (slot && m.status === "processing"){ slot.textContent = fmtElapsed(Date.now()-m.startTime); }
-      });
+      if (s.type === "machine"){
+        s.machines.forEach(function(m, idx){
+          var slot = card.querySelector('.machine-slot[data-machine="'+idx+'"] .timer');
+          if (slot && m.status === "processing"){ slot.textContent = fmtElapsed(Date.now()-m.startTime); }
+        });
+      }
       // refresh active-period highlighting / counts without full re-render churn
       var table = card.querySelectorAll("table tr");
       // cheap approach: just re-render periods table region if present
@@ -866,18 +901,24 @@
     } else {
       html += '<div class="card" id="stTabCard">';
       html += '<h2>'+escapeHtml(st.name)+'</h2>';
-      html += '<div class="machine-grid">';
-      st.machines.forEach(function(m, idx){
-        var busy = m.status === "processing";
-        html += '<div class="machine-slot '+(busy?"busy":"idle")+'" data-machine="'+idx+'">' +
-                '<div>Máquina '+(idx+1)+'</div>' +
-                '<div class="timer">'+(busy? fmtElapsed(Date.now()-m.startTime) : "Libre")+'</div></div>';
-      });
-      html += '</div>';
-      html += '<div class="big-btns">' +
-              '<button class="big-btn start" id="btnReceived">📥 Unidad recibida</button>' +
-              '<button class="big-btn finish" id="btnFinished">✅ Unidad terminada</button>' +
-              '</div>';
+      if (st.type === "unit"){
+        html += '<div class="big-btns">' +
+                '<button class="big-btn start" id="btnMarkUnit">🔘 Marcar unidad</button>' +
+                '</div>';
+      } else {
+        html += '<div class="machine-grid">';
+        st.machines.forEach(function(m, idx){
+          var busy = m.status === "processing";
+          html += '<div class="machine-slot '+(busy?"busy":"idle")+'" data-machine="'+idx+'">' +
+                  '<div>Máquina '+(idx+1)+'</div>' +
+                  '<div class="timer">'+(busy? fmtElapsed(Date.now()-m.startTime) : "Libre")+'</div></div>';
+        });
+        html += '</div>';
+        html += '<div class="big-btns">' +
+                '<button class="big-btn start" id="btnReceived">📥 Unidad recibida</button>' +
+                '<button class="big-btn finish" id="btnFinished">✅ Unidad terminada</button>' +
+                '</div>';
+      }
       html += '</div>';
     }
     main.innerHTML = html;
@@ -894,14 +935,16 @@
 
     var btnR = document.getElementById("btnReceived");
     var btnF = document.getElementById("btnFinished");
+    var btnU = document.getElementById("btnMarkUnit");
     if (btnR) btnR.addEventListener("click", function(){ pressReceived(st); });
     if (btnF) btnF.addEventListener("click", function(){ pressFinished(st); });
+    if (btnU) btnU.addEventListener("click", function(){ pressMarkUnit(st); });
   }
   function renderStationTimers(){
     if (activeTab !== "station") return;
     var st = stations.find(function(s){ return s.id === stationTabStationId; });
     var card = document.getElementById("stTabCard");
-    if (!st || !card) return;
+    if (!st || !card || st.type === "unit") return;
     st.machines.forEach(function(m, idx){
       var slot = card.querySelector('.machine-slot[data-machine="'+idx+'"] .timer');
       if (slot && m.status === "processing"){ slot.textContent = fmtElapsed(Date.now()-m.startTime); }
