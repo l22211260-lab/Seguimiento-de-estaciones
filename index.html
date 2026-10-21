@@ -133,6 +133,16 @@
   }
   .big-btn.start { background: var(--green-dim); color: var(--green); border: 2px solid var(--green); }
   .big-btn.finish { background: var(--red-dim); color: var(--red); border: 2px solid var(--red); }
+  @media (max-width: 700px){
+    .big-btn { min-height: 42vh; font-size: 26px; }
+  }
+  .period-counter-box {
+    background: var(--primary-dim); border-radius: 14px; padding: 18px; margin: 14px 0;
+    text-align: center;
+  }
+  .period-counter-label { font-size: 14px; color: var(--primary); font-weight: 700; }
+  .period-counter-value { font-size: 42px; font-weight: 800; color: var(--primary); line-height:1.2; margin: 4px 0; }
+  .period-counter-sub { font-size: 12px; color: var(--text-dim); }
   .toast {
     position: fixed; left:50%; bottom: 24px; transform: translateX(-50%);
     background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 10px;
@@ -565,6 +575,26 @@
       return dateStr(ts) === today && period.start <= timeStr(ts) && timeStr(ts) < period.end;
     }).length;
   }
+  function toMinutes(hhmm){
+    var parts = hhmm.split(":");
+    return (parseInt(parts[0],10)||0) * 60 + (parseInt(parts[1],10)||0);
+  }
+  // Productividad actual: compara lo real contra lo que "debería llevar" a estas alturas
+  // del periodo, suponiendo un ritmo constante hacia la meta.
+  function currentProductivity(station, period, count){
+    if (!(period.target > 0)) return null;
+    var startM = toMinutes(period.start);
+    var endM = toMinutes(period.end);
+    var duration = endM - startM;
+    if (duration <= 0) return null;
+    var nowM = toMinutes(timeStr(Date.now()));
+    var elapsed = nowM - startM;
+    if (elapsed < 0) elapsed = 0;
+    if (elapsed > duration) elapsed = duration;
+    var expected = period.target * (elapsed / duration);
+    if (expected <= 0) return null;
+    return Math.round((count / expected) * 100);
+  }
 
   // ---------- exportar a Excel ----------
   function safeFileNamePart(name){
@@ -585,7 +615,7 @@
         "Periodo": p.start+"–"+p.end,
         "Meta": p.target,
         "Real": count,
-        "Productividad (%)": prod===null? "" : prod
+        "Productividad acumulada (%)": prod===null? "" : prod
       };
     });
   }
@@ -606,7 +636,7 @@
     var usedNames = {};
     stations.forEach(function(s){
       var rows = periodRowsForSheet(s);
-      var ws = XLSX.utils.json_to_sheet(rows.length? rows : [{"Periodo":"", "Meta":"", "Real":"", "Productividad (%)":""}]);
+      var ws = XLSX.utils.json_to_sheet(rows.length? rows : [{"Periodo":"", "Meta":"", "Real":"", "Productividad acumulada (%)":""}]);
       var base = safeSheetName(s.name);
       var name = base;
       var n = 2;
@@ -852,15 +882,18 @@
   function renderPeriodsTable(s){
     if (!s.periods.length) return '<p class="muted">Sin periodos configurados para esta estación.</p>';
     var activeId = activePeriodId(s);
-    var html = '<table><thead><tr><th>Periodo</th><th>Meta</th><th>Real</th><th>Productividad</th></tr></thead><tbody>';
+    var html = '<table><thead><tr><th>Periodo</th><th>Meta</th><th>Real</th><th>Productividad acumulada</th><th>Productividad actual</th></tr></thead><tbody>';
     s.periods.slice().sort(function(a,b){ return a.start.localeCompare(b.start); }).forEach(function(p){
       var count = countForPeriod(s,p);
       var eff = p.target>0 ? Math.round((count/p.target)*100) : null;
       var effClass = eff===null? "" : (eff>=100?"eff-good": eff>=70?"eff-mid":"eff-bad");
+      var curEff = currentProductivity(s, p, count);
+      var curEffClass = curEff===null? "" : (curEff>=100?"eff-good": curEff>=70?"eff-mid":"eff-bad");
       html += '<tr class="'+(p.id===activeId?"active-period":"")+'">' +
               '<td>'+p.start+'–'+p.end+(p.id===activeId?' ⏱':'')+'</td>' +
               '<td>'+p.target+'</td><td>'+count+'</td>' +
-              '<td class="'+effClass+'">'+(eff===null?"–":eff+"%")+'</td></tr>';
+              '<td class="'+effClass+'">'+(eff===null?"–":eff+"%")+'</td>' +
+              '<td class="'+curEffClass+'">'+(curEff===null?"–":curEff+"%")+'</td></tr>';
     });
     html += '</tbody></table>';
     return html;
@@ -901,6 +934,7 @@
     } else {
       html += '<div class="card" id="stTabCard">';
       html += '<h2>'+escapeHtml(st.name)+'</h2>';
+      html += '<div class="period-counter-box" id="periodCounterBox">' + periodCounterInnerHtml(st) + '</div>';
       if (st.type === "unit"){
         html += '<div class="big-btns">' +
                 '<button class="big-btn start" id="btnMarkUnit">🔘 Marcar unidad</button>' +
@@ -940,11 +974,27 @@
     if (btnF) btnF.addEventListener("click", function(){ pressFinished(st); });
     if (btnU) btnU.addEventListener("click", function(){ pressMarkUnit(st); });
   }
+  function periodCounterInnerHtml(station){
+    var activeId = activePeriodId(station);
+    var period = station.periods.find(function(p){ return p.id === activeId; });
+    if (!period){
+      return '<div class="period-counter-label">Sin periodo activo</div>' +
+             '<div class="period-counter-value">–</div>' +
+             '<div class="period-counter-sub">no hay un periodo configurado para esta hora</div>';
+    }
+    var count = countForPeriod(station, period);
+    return '<div class="period-counter-label">Periodo actual: '+period.start+'–'+period.end+'</div>' +
+           '<div class="period-counter-value">'+count+'</div>' +
+           '<div class="period-counter-sub">unidades marcadas en este periodo'+(period.target>0?' · meta '+period.target:'')+'</div>';
+  }
   function renderStationTimers(){
     if (activeTab !== "station") return;
     var st = stations.find(function(s){ return s.id === stationTabStationId; });
     var card = document.getElementById("stTabCard");
-    if (!st || !card || st.type === "unit") return;
+    if (!st || !card) return;
+    var counterBox = card.querySelector("#periodCounterBox");
+    if (counterBox) counterBox.innerHTML = periodCounterInnerHtml(st);
+    if (st.type === "unit") return;
     st.machines.forEach(function(m, idx){
       var slot = card.querySelector('.machine-slot[data-machine="'+idx+'"] .timer');
       if (slot && m.status === "processing"){ slot.textContent = fmtElapsed(Date.now()-m.startTime); }
