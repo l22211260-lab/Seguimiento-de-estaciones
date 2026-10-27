@@ -143,6 +143,34 @@
   .period-counter-label { font-size: 14px; color: var(--primary); font-weight: 700; }
   .period-counter-value { font-size: 42px; font-weight: 800; color: var(--primary); line-height:1.2; margin: 4px 0; }
   .period-counter-sub { font-size: 12px; color: var(--text-dim); }
+
+  :root { --purple:#7c4dcc; --purple-dim:#efe8fb; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]){ --purple:#a98bf0; --purple-dim:#2a2142; }
+  }
+  :root[data-theme="dark"]{ --purple:#a98bf0; --purple-dim:#2a2142; }
+
+  /* Estación de entradas múltiples: contadores y botones en cuadrícula */
+  .entry-counters { display:grid; gap:8px; margin: 8px 0 4px; }
+  .entry-counter { background: var(--card); border-radius: 10px; padding: 8px 4px; }
+  .entry-counter-name { font-size: 12px; color: var(--text-dim); font-weight: 700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .entry-counter-value { font-size: 30px; font-weight: 800; color: var(--primary); line-height: 1.1; }
+  .entry-counter-meta { font-size: 11px; color: var(--text-dim); }
+  .entry-grid { display:grid; gap:12px; margin-top:14px; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; height: 320px; }
+  .entry-grid.n2 { grid-template-columns: 1fr; }                      /* 2 entradas: dos mitades */
+  .entry-grid.n3 .entry-btn:nth-child(3) { grid-column: 1 / -1; }     /* 3 entradas: 2 arriba y 1 grande abajo */
+  .entry-btn {
+    width:100%; height:100%; border-radius:16px; font-size:22px; font-weight:800;
+    border:2px solid; padding:8px; word-break:break-word; line-height:1.2;
+  }
+  .entry-btn.c0 { background: var(--green-dim);   color: var(--green);   border-color: var(--green); }
+  .entry-btn.c1 { background: var(--primary-dim); color: var(--primary); border-color: var(--primary); }
+  .entry-btn.c2 { background: var(--amber-dim);   color: var(--amber);   border-color: var(--amber); }
+  .entry-btn.c3 { background: var(--purple-dim);  color: var(--purple);  border-color: var(--purple); }
+  @media (max-width: 700px){
+    .entry-grid { height: 48vh; }
+    .entry-btn { font-size: 24px; }
+  }
   .toast {
     position: fixed; left:50%; bottom: 24px; transform: translateX(-50%);
     background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 10px;
@@ -292,6 +320,8 @@
   var configSelectedStationId = null;
   var stationTabStationId = lsGet("station-app:stationtab-station", "");
   var stationsChannel = null;
+  var entrySaving = {}; // stationId -> true mientras se guarda el conteo de entradas
+  var entryDirty = {};  // stationId -> true si hubo marcas nuevas durante el guardado
   var pendingWrite = {}; // stationId -> bool, to prevent overlapping writes to same doc
 
   var clockTimer = null;
@@ -340,11 +370,15 @@
     return {
       id: r.id,
       name: r.name,
-      type: r.station_type || "machine", // "machine" o "unit"
+      type: r.station_type || "machine", // "machine", "unit" o "multi"
       machineCount: r.machine_count || 1,
+      dailyGoal: r.daily_goal || 0,
       periods: r.periods || [],
+      breaks: r.breaks || [],
       machines: r.machines || [],
-      records: r.records || []
+      records: r.records || [],
+      entries: r.entries || [],           // solo tipo "multi": [{id, name, goal}]
+      entryRecords: r.entry_records || {} // solo tipo "multi": {entryId: [timestamps]}
     };
   }
 
@@ -380,7 +414,15 @@
     function load(){
       supa.from("stations").select("*").eq("line_id", selectedLineId).order("created_at",{ascending:true}).then(function(res){
         if (res.error){ toast("Error cargando estaciones: " + res.error.message); return; }
+        var prev = stations;
         stations = res.data.map(mapStationRow);
+        // si hay marcas de entradas pendientes de guardar, conserva la versión local
+        stations.forEach(function(s){
+          if (entrySaving[s.id] || entryDirty[s.id]){
+            var old = prev.find(function(p){ return p.id === s.id; });
+            if (old) s.entryRecords = old.entryRecords;
+          }
+        });
         render();
       });
     }
@@ -453,9 +495,27 @@
       });
     });
   }
-  function clearStationRecords(station){
-    showConfirmModal('¿Limpiar el contador de piezas (real) de "'+station.name+'"? Esto borra el historial de unidades procesadas registradas.', function(){
-      supa.from("stations").update({records: []}).eq("id", station.id).then(function(res){
+  // "view" puede ser una estación normal o una entrada individual de una estación múltiple
+  function clearStationRecords(view){
+    showConfirmModal('¿Limpiar el contador de piezas (real) de "'+view.name+'"? Esto borra el historial de unidades procesadas registradas.', function(){
+      if (view.type === "multi"){
+        var ms = stations.find(function(s){ return s.id === view.id; });
+        if (!ms) return;
+        ms.entryRecords = {};
+        toast("Contador de piezas reiniciado");
+        scheduleEntrySave(ms.id);
+        return;
+      }
+      if (view.entryId){
+        var st = stations.find(function(s){ return s.id === view.baseId; });
+        if (!st) return;
+        st.entryRecords = cloneEntryMap(st.entryRecords);
+        st.entryRecords[view.entryId] = [];
+        toast("Contador de piezas reiniciado");
+        scheduleEntrySave(st.id);
+        return;
+      }
+      supa.from("stations").update({records: []}).eq("id", view.id).then(function(res){
         if (res.error){ toast("No se pudo limpiar el contador"); return; }
         toast("Contador de piezas reiniciado");
       });
@@ -476,10 +536,151 @@
       if (res.error) toast("No se pudo actualizar");
     });
   }
+  function defaultEntries(n, existing){
+    var out = (existing || []).slice(0, n);
+    while (out.length < n) out.push({id: uid(), name: "Accesorio "+(out.length+1), goal: 0});
+    return out;
+  }
   function updateStationType(station, newType){
-    if (newType !== "machine" && newType !== "unit") return;
-    supa.from("stations").update({station_type: newType}).eq("id", station.id).then(function(res){
+    if (newType !== "machine" && newType !== "unit" && newType !== "multi") return;
+    var payload = {station_type: newType};
+    if (newType === "multi" && station.entries.length < 2){
+      payload.entries = defaultEntries(2, station.entries);
+    }
+    supa.from("stations").update(payload).eq("id", station.id).then(function(res){
       if (res.error) toast("No se pudo actualizar el tipo de estación");
+    });
+  }
+
+  // ---------- meta diaria ----------
+  function updateDailyGoal(station, value){
+    var goal = Math.max(0, parseInt(value,10) || 0);
+    supa.from("stations").update({daily_goal: goal}).eq("id", station.id).then(function(res){
+      if (res.error) toast("No se pudo guardar la meta diaria");
+    });
+  }
+
+  // ---------- descansos ----------
+  function saveBreaks(station, breaks, errMsg){
+    supa.from("stations").update({breaks: breaks}).eq("id", station.id).then(function(res){
+      if (res.error) toast(errMsg);
+    });
+  }
+  function addBreak(station){
+    var breaks = station.breaks.slice();
+    breaks.push({id: uid(), start:"12:00", end:"12:30"});
+    saveBreaks(station, breaks, "No se pudo agregar el descanso");
+  }
+  function updateBreak(station, breakId, field, value){
+    var breaks = station.breaks.map(function(b){
+      if (b.id !== breakId) return b;
+      var nb = Object.assign({}, b);
+      nb[field] = value;
+      if (nb.start && nb.end && nb.end <= nb.start) toast("⚠️ El fin del descanso debe ser posterior al inicio");
+      return nb;
+    });
+    saveBreaks(station, breaks, "No se pudo guardar el descanso");
+  }
+  function deleteBreak(station, breakId){
+    saveBreaks(station, station.breaks.filter(function(b){ return b.id !== breakId; }), "No se pudo eliminar el descanso");
+  }
+
+  // ---------- entradas (estación "de entradas múltiples") ----------
+  function cloneEntryMap(m){
+    var o = {};
+    Object.keys(m || {}).forEach(function(k){ o[k] = (m[k] || []).slice(); });
+    return o;
+  }
+  function updateEntryCount(station, newCount){
+    newCount = Math.max(2, Math.min(4, parseInt(newCount,10) || 2));
+    var entries = station.entries.slice();
+    if (newCount >= entries.length){
+      supa.from("stations").update({entries: defaultEntries(newCount, entries)}).eq("id", station.id).then(function(res){
+        if (res.error) toast("No se pudo actualizar las entradas");
+      });
+      return;
+    }
+    var removed = entries.slice(newCount);
+    var hasData = removed.some(function(en){ return (station.entryRecords[en.id] || []).length > 0; });
+    function apply(){
+      var map = cloneEntryMap(station.entryRecords);
+      removed.forEach(function(en){ delete map[en.id]; });
+      station.entryRecords = map;
+      supa.from("stations").update({entries: entries.slice(0, newCount), entry_records: map}).eq("id", station.id).then(function(res){
+        if (res.error) toast("No se pudo actualizar las entradas");
+      });
+    }
+    if (hasData){
+      var names = removed.map(function(en){ return en.name; }).join(", ");
+      showConfirmModal('Al reducir las entradas se borrarán los registros de: '+names+'. ¿Continuar?', apply);
+    } else {
+      apply();
+    }
+  }
+  function updateEntryField(station, entryId, field, value){
+    var entries = station.entries.map(function(en){
+      if (en.id !== entryId) return en;
+      var ne = Object.assign({}, en);
+      if (field === "goal") ne.goal = Math.max(0, parseInt(value,10) || 0);
+      else ne.name = String(value).trim() || en.name;
+      return ne;
+    });
+    supa.from("stations").update({entries: entries}).eq("id", station.id).then(function(res){
+      if (res.error) toast("No se pudo guardar la entrada");
+    });
+  }
+
+  // ---------- copiar / pegar estaciones ----------
+  var CLIP_KEY = "station-app:clipboard";
+  function getClipboard(){
+    try { var v = JSON.parse(lsGet(CLIP_KEY, "[]")); return Array.isArray(v) ? v : []; } catch(e){ return []; }
+  }
+  function stationTemplate(s){
+    return {
+      name: s.name, type: s.type, machineCount: s.machineCount, dailyGoal: s.dailyGoal,
+      periods: s.periods.map(function(p){ return {start:p.start, end:p.end, target:p.target||0}; }),
+      breaks: s.breaks.map(function(b){ return {start:b.start, end:b.end}; }),
+      entries: s.entries.map(function(e){ return {name:e.name, goal:e.goal||0}; })
+    };
+  }
+  function copyStations(list){
+    if (!list.length){ toast("No hay estaciones para copiar"); return; }
+    lsSet(CLIP_KEY, JSON.stringify(list.map(stationTemplate)));
+    toast("📋 Copiada"+(list.length>1?"s":"")+": "+list.length+" estación"+(list.length>1?"es":""));
+    render();
+  }
+  function uniqueStationName(base, taken){
+    var low = taken.map(function(n){ return String(n).toLowerCase(); });
+    if (low.indexOf(base.toLowerCase()) === -1) return base;
+    var cand = base+" (copia)", n = 2;
+    while (low.indexOf(cand.toLowerCase()) !== -1){ cand = base+" (copia "+n+")"; n++; }
+    return cand;
+  }
+  function pasteStations(){
+    if (!selectedLineId){ toast("Selecciona una línea primero"); return; }
+    var clip = getClipboard();
+    if (!clip.length){ toast("No hay nada copiado todavía"); return; }
+    var taken = stations.map(function(s){ return s.name; });
+    var base = Date.now();
+    var rows = clip.map(function(t, i){
+      var name = uniqueStationName(t.name || "Estación", taken);
+      taken.push(name);
+      var count = Math.max(1, t.machineCount || 2);
+      var machines = [];
+      for (var k=0;k<count;k++) machines.push({status:"idle", startTime:null});
+      return {
+        line_id: selectedLineId, name: name, station_type: t.type || "machine", machine_count: count,
+        daily_goal: t.dailyGoal || 0, machines: machines,
+        periods: (t.periods || []).map(function(p){ return {id:uid(), start:p.start, end:p.end, target:p.target||0}; }),
+        breaks: (t.breaks || []).map(function(b){ return {id:uid(), start:b.start, end:b.end}; }),
+        entries: (t.entries || []).map(function(e){ return {id:uid(), name:e.name, goal:e.goal||0}; }),
+        records: [], entry_records: {},
+        created_at: new Date(base + i).toISOString()
+      };
+    });
+    supa.from("stations").insert(rows).then(function(res){
+      if (res.error){ toast("No se pudo pegar: "+res.error.message); return; }
+      toast("📥 Pegada"+(rows.length>1?"s":"")+": "+rows.length+" estación"+(rows.length>1?"es":""));
     });
   }
 
@@ -562,6 +763,34 @@
       toast("✅ Unidad registrada");
     });
   }
+  // Estación de entradas múltiples: la marca se aplica de inmediato en local y se guarda
+  // agrupada, así que se pueden tocar varios botones seguidos sin perder ninguna.
+  function pressEntry(station, entryId){
+    var st = stations.find(function(s){ return s.id === station.id; }) || station;
+    var en = st.entries.find(function(e){ return e.id === entryId; });
+    if (!en) return;
+    var arr = ((st.entryRecords || {})[entryId] || []).slice();
+    arr.push(Date.now());
+    if (arr.length > 2000) arr = arr.slice(arr.length - 2000);
+    st.entryRecords = cloneEntryMap(st.entryRecords);
+    st.entryRecords[entryId] = arr;
+    toast("✅ "+en.name+" +1", 1200);
+    renderStationTimers();
+    scheduleEntrySave(st.id);
+  }
+  function scheduleEntrySave(stationId){
+    if (entrySaving[stationId]){ entryDirty[stationId] = true; return; }
+    var st = stations.find(function(s){ return s.id === stationId; });
+    if (!st) return;
+    entrySaving[stationId] = true;
+    entryDirty[stationId] = false;
+    var payload = cloneEntryMap(st.entryRecords);
+    supa.from("stations").update({entry_records: payload}).eq("id", stationId).then(function(res){
+      entrySaving[stationId] = false;
+      if (res.error){ entryDirty[stationId] = false; toast("No se pudo registrar la marca"); return; }
+      if (entryDirty[stationId]){ entryDirty[stationId] = false; scheduleEntrySave(stationId); }
+    });
+  }
 
   // ---------- period stats ----------
   function activePeriodId(station){
@@ -579,21 +808,85 @@
     var parts = hhmm.split(":");
     return (parseInt(parts[0],10)||0) * 60 + (parseInt(parts[1],10)||0);
   }
+  // Minutos productivos entre dos horas del día (en minutos), descontando los descansos
+  // (los descansos que se traslapan entre sí no se cuentan doble).
+  function productiveBetween(view, fromM, toM){
+    if (toM <= fromM) return 0;
+    var ivs = [];
+    (view.breaks || []).forEach(function(b){
+      var bs = Math.max(fromM, toMinutes(b.start)), be = Math.min(toM, toMinutes(b.end));
+      if (be > bs) ivs.push([bs, be]);
+    });
+    ivs.sort(function(a,b){ return a[0] - b[0]; });
+    var brk = 0, cs = null, ce = null;
+    ivs.forEach(function(iv){
+      if (cs === null){ cs = iv[0]; ce = iv[1]; }
+      else if (iv[0] <= ce){ ce = Math.max(ce, iv[1]); }
+      else { brk += ce - cs; cs = iv[0]; ce = iv[1]; }
+    });
+    if (cs !== null) brk += ce - cs;
+    return (toM - fromM) - brk;
+  }
+  // Meta por periodo. Si hay meta diaria, se reparte entre los periodos según su tiempo
+  // productivo (redondeando hacia arriba de forma acumulada, así la suma siempre es la meta diaria).
+  // Si no hay meta diaria se usan las metas manuales de cada periodo.
+  function computeTargets(view){
+    var map = {};
+    var sorted = view.periods.slice().sort(function(a,b){ return a.start.localeCompare(b.start); });
+    var goal = view.dailyGoal || 0;
+    if (!(goal > 0)){
+      sorted.forEach(function(p){ map[p.id] = view.forceAuto ? 0 : (p.target || 0); });
+      return map;
+    }
+    var mins = sorted.map(function(p){ return productiveBetween(view, toMinutes(p.start), toMinutes(p.end)); });
+    var total = mins.reduce(function(a,b){ return a + b; }, 0);
+    if (total <= 0){
+      sorted.forEach(function(p){ map[p.id] = 0; });
+      return map;
+    }
+    var cum = 0, prevCeil = 0;
+    sorted.forEach(function(p, i){
+      cum += mins[i];
+      var c = Math.ceil(goal * cum / total - 1e-9);
+      map[p.id] = c - prevCeil;
+      prevCeil = c;
+    });
+    return map;
+  }
   // Productividad actual: compara lo real contra lo que "debería llevar" a estas alturas
-  // del periodo, suponiendo un ritmo constante hacia la meta.
-  function currentProductivity(station, period, count){
-    if (!(period.target > 0)) return null;
-    var startM = toMinutes(period.start);
-    var endM = toMinutes(period.end);
-    var duration = endM - startM;
-    if (duration <= 0) return null;
+  // del periodo, suponiendo un ritmo constante hacia la meta (sin contar el tiempo de descansos).
+  function currentProductivity(view, period, count, target){
+    if (!(target > 0)) return null;
+    var s = toMinutes(period.start), e = toMinutes(period.end);
+    var total = productiveBetween(view, s, e);
+    if (total <= 0) return null;
     var nowM = toMinutes(timeStr(Date.now()));
-    var elapsed = nowM - startM;
-    if (elapsed < 0) elapsed = 0;
-    if (elapsed > duration) elapsed = duration;
-    var expected = period.target * (elapsed / duration);
+    var upto = Math.min(Math.max(nowM, s), e);
+    var done = productiveBetween(view, s, upto);
+    var expected = target * (done / total);
     if (expected <= 0) return null;
     return Math.round((count / expected) * 100);
+  }
+
+  // Una estación normal es su propia "vista". Una estación de entradas múltiples se divide en
+  // una vista por entrada, que se comporta como una estación aparte (mismo nombre + "Entrada X").
+  function viewsForStation(s){
+    if (s.type === "multi"){
+      return s.entries.map(function(en){
+        return {
+          id: s.id+":"+en.id, baseId: s.id, entryId: en.id, stationName: s.name, entryName: en.name,
+          name: s.name+" - Entrada "+en.name, type: "entry",
+          periods: s.periods, breaks: s.breaks, dailyGoal: en.goal || 0, forceAuto: true,
+          records: (s.entryRecords || {})[en.id] || [], machines: [], machineCount: 0
+        };
+      });
+    }
+    return [s];
+  }
+  function allViews(){
+    var out = [];
+    stations.forEach(function(s){ out.push.apply(out, viewsForStation(s)); });
+    return out;
   }
 
   // ---------- exportar a Excel ----------
@@ -606,43 +899,59 @@
     var clean = String(name).replace(/[\\\/\?\*\[\]:]/g, " ").trim();
     return clean.slice(0, 31) || "Estación";
   }
-  function periodRowsForSheet(station){
-    var periodsSorted = station.periods.slice().sort(function(a,b){ return a.start.localeCompare(b.start); });
+  function periodRowsForSheet(view){
+    var targets = computeTargets(view);
+    var periodsSorted = view.periods.slice().sort(function(a,b){ return a.start.localeCompare(b.start); });
     return periodsSorted.map(function(p){
-      var count = countForPeriod(station, p);
-      var prod = p.target>0 ? Math.round((count/p.target)*100) : null;
+      var count = countForPeriod(view, p);
+      var target = targets[p.id] || 0;
+      var prod = target>0 ? Math.round((count/target)*100) : null;
       return {
         "Periodo": p.start+"–"+p.end,
-        "Meta": p.target,
+        "Meta": target,
         "Real": count,
         "Productividad acumulada (%)": prod===null? "" : prod
       };
     });
   }
-  function exportStationToExcel(station){
+  function sheetNameForView(view){
+    if (view.entryId){
+      var tail = " - Entrada "+view.entryName;
+      var room = 31 - tail.length;
+      if (room >= 4) return safeSheetName(view.stationName.slice(0, room) + tail);
+    }
+    return safeSheetName(view.name);
+  }
+  function uniqueSheetName(base, used){
+    var name = base, n = 2;
+    while (used[name.toLowerCase()]){
+      var suffix = " "+n;
+      name = base.slice(0, 31 - suffix.length) + suffix;
+      n++;
+    }
+    used[name.toLowerCase()] = true;
+    return name;
+  }
+  function exportStationToExcel(view){
     if (!window.XLSX){ toast("No se pudo cargar la librería de Excel."); return; }
-    var rows = periodRowsForSheet(station);
+    var rows = periodRowsForSheet(view);
     if (!rows.length){ toast("Esta estación no tiene periodos configurados para exportar."); return; }
     var ws = XLSX.utils.json_to_sheet(rows);
     var wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, safeSheetName(station.name));
-    var fname = safeFileNamePart(lineName(selectedLineId))+", "+safeFileNamePart(station.name)+", "+todayStr()+".xlsx";
+    XLSX.utils.book_append_sheet(wb, ws, sheetNameForView(view));
+    var fname = safeFileNamePart(lineName(selectedLineId))+", "+safeFileNamePart(view.name)+", "+todayStr()+".xlsx";
     XLSX.writeFile(wb, fname);
   }
   function exportLineToExcel(){
     if (!window.XLSX){ toast("No se pudo cargar la librería de Excel."); return; }
-    if (!stations.length){ toast("Esta línea no tiene estaciones para exportar."); return; }
+    var views = allViews();
+    if (!views.length){ toast("Esta línea no tiene estaciones para exportar."); return; }
     var wb = XLSX.utils.book_new();
-    var usedNames = {};
-    stations.forEach(function(s){
-      var rows = periodRowsForSheet(s);
+    var used = {};
+    views.forEach(function(v){
+      var rows = periodRowsForSheet(v);
       var ws = XLSX.utils.json_to_sheet(rows.length? rows : [{"Periodo":"", "Meta":"", "Real":"", "Productividad acumulada (%)":""}]);
-      var base = safeSheetName(s.name);
-      var name = base;
-      var n = 2;
-      while (usedNames[name]){ name = safeSheetName(base+" "+n); n++; }
-      usedNames[name] = true;
-      XLSX.utils.book_append_sheet(wb, ws, name);
+      XLSX.utils.book_append_sheet(wb, ws, uniqueSheetName(sheetNameForView(v), used));
     });
     var fname = safeFileNamePart(lineName(selectedLineId))+", Todas las estaciones, "+todayStr()+".xlsx";
     XLSX.writeFile(wb, fname);
@@ -687,8 +996,12 @@
             '<div class="add-row"><input type="text" id="newLineInline" placeholder="Nombre de línea nueva"><button class="primary" id="addLineInline">Agregar</button></div></div>';
 
     if (selectedLineId){
+      var clipN = getClipboard().length;
       html += '<div class="card"><div class="station-header"><h2 style="margin:0">Estaciones de "'+escapeHtml(lineName(selectedLineId))+'"</h2>' +
-              '<button class="ghost" id="addStationBtn">+ Estación</button></div>';
+              '<span class="rowline">' +
+              '<button class="subtle" id="copyAllBtn">📋 Copiar todas</button>' +
+              '<button class="subtle" id="pasteBtn"'+(clipN?'':' disabled')+'>📥 Pegar'+(clipN?' ('+clipN+')':'')+'</button>' +
+              '<button class="ghost" id="addStationBtn">+ Estación</button></span></div>';
       if (!stations.length){
         html += '<p class="empty">Esta línea no tiene estaciones todavía.</p>';
       } else {
@@ -742,15 +1055,26 @@
     }
     var addStationBtn = document.getElementById("addStationBtn");
     if (addStationBtn) addStationBtn.addEventListener("click", onNewStation);
+    var copyAllBtn = document.getElementById("copyAllBtn");
+    if (copyAllBtn) copyAllBtn.addEventListener("click", function(){ copyStations(stations); });
+    var pasteBtn = document.getElementById("pasteBtn");
+    if (pasteBtn) pasteBtn.addEventListener("click", pasteStations);
 
     var stationList = document.getElementById("stationList");
     if (stationList){
       stationList.innerHTML = stations.map(function(s){
+        var info = s.type === "multi" ? (s.entries.length+' entradas')
+                 : s.type === "unit" ? 'unidad'
+                 : (s.machineCount+' máquinas');
         return '<div class="list-item'+(s.id===configSelectedStationId?" selected":"")+'" data-st="'+s.id+'">' +
-               '<span>'+escapeHtml(s.name)+' <span class="muted">('+s.machineCount+' máquinas)</span></span>' +
-               '<span class="actions"><button class="subtle" data-act="rename-st" data-id="'+s.id+'">✏️</button>' +
+               '<span>'+escapeHtml(s.name)+' <span class="muted">('+info+')</span></span>' +
+               '<span class="actions"><button class="subtle" data-act="copy-st" data-id="'+s.id+'" title="Copiar">📋</button>' +
+               '<button class="subtle" data-act="rename-st" data-id="'+s.id+'">✏️</button>' +
                '<button class="danger" data-act="delete-st" data-id="'+s.id+'">🗑️</button></span></div>';
       }).join("");
+      stationList.querySelectorAll('[data-act="copy-st"]').forEach(function(b){
+        b.addEventListener("click", function(){ var s=stations.find(function(x){return x.id===b.getAttribute("data-id");}); if (s) copyStations([s]); });
+      });
       stationList.querySelectorAll(".list-item").forEach(function(el){
         el.addEventListener("click", function(e){
           if (e.target.closest("button")) return;
@@ -781,26 +1105,66 @@
             '<select id="stationTypeInput">' +
             '<option value="machine"'+(st.type==="machine"?" selected":"")+'>Máquina (procesa por lote, con cronómetro)</option>' +
             '<option value="unit"'+(st.type==="unit"?" selected":"")+'>Unidad (marca una por una, sin cronómetro)</option>' +
+            '<option value="multi"'+(st.type==="multi"?" selected":"")+'>De entradas múltiples (varios tipos de unidad)</option>' +
             '</select></div>';
     if (st.type === "machine"){
       html += '<div class="rowline" style="margin-top:8px"><label class="muted">Cantidad de máquinas:</label>' +
               '<input type="number" min="1" max="12" id="machineCountInput" value="'+st.machineCount+'" style="width:70px"></div>';
     }
-    html += '<div class="section-title">Periodos de tiempo y metas</div>';
+    if (st.type === "multi"){
+      html += '<div class="rowline" style="margin-top:8px"><label class="muted">Cantidad de entradas:</label>' +
+              '<select id="entryCountInput">' +
+              [2,3,4].map(function(n){ return '<option value="'+n+'"'+(st.entries.length===n?" selected":"")+'>'+n+'</option>'; }).join("") +
+              '</select></div>';
+      html += '<div class="section-title">Entradas y meta diaria de cada una</div>';
+      st.entries.forEach(function(en){
+        html += '<div class="period-row" data-eid="'+en.id+'">' +
+                '<input type="text" class="e-name" value="'+escapeHtml(en.name)+'" placeholder="Nombre" style="width:150px"> · Meta diaria: ' +
+                '<input type="number" min="0" class="e-goal" value="'+(en.goal||0)+'" style="width:80px"></div>';
+      });
+    } else {
+      html += '<div class="rowline" style="margin-top:8px"><label class="muted">Meta diaria (unidades):</label>' +
+              '<input type="number" min="0" id="dailyGoalInput" value="'+(st.dailyGoal||0)+'" style="width:90px"></div>' +
+              '<p class="muted" style="margin:4px 0 0">Con meta diaria mayor a 0, la meta de cada periodo se calcula sola según el tiempo productivo (descontando descansos). Con 0 puedes capturar la meta de cada periodo a mano.</p>';
+    }
+    html += '<div class="section-title">Periodos de tiempo'+(st.type==="multi" || st.dailyGoal>0 ? '' : ' y metas')+'</div>';
     html += '<div id="periodsEditor">';
     if (!st.periods.length){
       html += '<p class="muted">No hay periodos definidos aún.</p>';
     } else {
+      var cfgViews = viewsForStation(st);
+      var cfgTargets = cfgViews.map(function(v){ return computeTargets(v); });
       st.periods.forEach(function(p){
+        var targetCell;
+        if (st.type === "multi"){
+          targetCell = ' · <span class="muted">Metas: ' + cfgViews.map(function(v, i){
+            return escapeHtml(v.entryName)+' <b>'+(cfgTargets[i][p.id]||0)+'</b>';
+          }).join(' · ') + '</span>';
+        } else if (st.dailyGoal > 0){
+          targetCell = ' · <span class="muted">Meta (auto): <b>'+(cfgTargets[0][p.id]||0)+'</b></span>';
+        } else {
+          targetCell = ' · Meta: <input type="number" min="0" class="p-target" value="'+(p.target||0)+'" style="width:70px">';
+        }
         html += '<div class="period-row" data-pid="'+p.id+'">' +
           '<input type="time" class="p-start" value="'+p.start+'"> a ' +
-          '<input type="time" class="p-end" value="'+p.end+'"> · Meta: ' +
-          '<input type="number" min="0" class="p-target" value="'+p.target+'" style="width:70px">' +
+          '<input type="time" class="p-end" value="'+p.end+'">' + targetCell +
           '<button class="danger p-del">🗑️</button></div>';
       });
     }
     html += '</div>';
     html += '<button class="ghost" id="addPeriodBtn">+ Agregar periodo</button>';
+    html += '<div class="section-title">Descansos</div>';
+    if (!st.breaks.length){
+      html += '<p class="muted">Sin descansos. Agrega los que necesites (en cualquier punto del turno): no cuentan como tiempo productivo al repartir la meta.</p>';
+    } else {
+      st.breaks.forEach(function(b){
+        html += '<div class="period-row" data-bid="'+b.id+'">' +
+          '<input type="time" class="b-start" value="'+b.start+'"> a ' +
+          '<input type="time" class="b-end" value="'+b.end+'">' +
+          '<button class="danger b-del">🗑️</button></div>';
+      });
+    }
+    html += '<button class="ghost" id="addBreakBtn">+ Agregar descanso</button>';
     html += '<div class="section-title">Contador de piezas</div>';
     html += '<button class="danger" id="clearRecordsBtn">🧹 Limpiar contador de piezas (real)</button>';
     html += '</div>';
@@ -818,17 +1182,35 @@
     if (mc){
       mc.addEventListener("change", function(){ updateMachineCount(st, mc.value); });
     }
+    var ec = document.getElementById("entryCountInput");
+    if (ec) ec.addEventListener("change", function(){ updateEntryCount(st, ec.value); });
+    var dg = document.getElementById("dailyGoalInput");
+    if (dg) dg.addEventListener("change", function(){ updateDailyGoal(st, dg.value); });
     var addP = document.getElementById("addPeriodBtn");
     if (addP) addP.addEventListener("click", function(){ addPeriod(st); });
+    var addB = document.getElementById("addBreakBtn");
+    if (addB) addB.addEventListener("click", function(){ addBreak(st); });
     var clearBtn = document.getElementById("clearRecordsBtn");
     if (clearBtn) clearBtn.addEventListener("click", function(){ clearStationRecords(st); });
 
-    document.querySelectorAll(".period-row").forEach(function(row){
+    document.querySelectorAll(".period-row[data-pid]").forEach(function(row){
       var pid = row.getAttribute("data-pid");
       row.querySelector(".p-start").addEventListener("change", function(e){ updatePeriod(st,pid,"start",e.target.value); });
       row.querySelector(".p-end").addEventListener("change", function(e){ updatePeriod(st,pid,"end",e.target.value); });
-      row.querySelector(".p-target").addEventListener("change", function(e){ updatePeriod(st,pid,"target",e.target.value); });
+      var tgt = row.querySelector(".p-target");
+      if (tgt) tgt.addEventListener("change", function(e){ updatePeriod(st,pid,"target",e.target.value); });
       row.querySelector(".p-del").addEventListener("click", function(){ deletePeriod(st,pid); });
+    });
+    document.querySelectorAll(".period-row[data-bid]").forEach(function(row){
+      var bid = row.getAttribute("data-bid");
+      row.querySelector(".b-start").addEventListener("change", function(e){ updateBreak(st,bid,"start",e.target.value); });
+      row.querySelector(".b-end").addEventListener("change", function(e){ updateBreak(st,bid,"end",e.target.value); });
+      row.querySelector(".b-del").addEventListener("click", function(){ deleteBreak(st,bid); });
+    });
+    document.querySelectorAll(".period-row[data-eid]").forEach(function(row){
+      var eid = row.getAttribute("data-eid");
+      row.querySelector(".e-name").addEventListener("change", function(e){ updateEntryField(st,eid,"name",e.target.value); });
+      row.querySelector(".e-goal").addEventListener("change", function(e){ updateEntryField(st,eid,"goal",e.target.value); });
     });
   }
 
@@ -843,16 +1225,17 @@
                 '<h2 style="margin:0">'+escapeHtml(lineName(selectedLineId))+'</h2>' +
                 '<button class="ghost" id="exportLineBtn">📥 Descargar Excel (toda la línea)</button>' +
                 '</div></div>';
-    stations.forEach(function(s){
-      html += '<div class="card" id="mon-'+s.id+'">';
-      html += '<div class="station-header"><h3>'+escapeHtml(s.name)+'</h3>' +
+    allViews().forEach(function(v){
+      html += '<div class="card" id="mon-'+v.id+'">';
+      html += '<div class="station-header"><h3>'+escapeHtml(v.name)+'</h3>' +
               '<span class="rowline">' +
-              (s.type==="machine" ? '<span class="muted">'+s.machineCount+' máquinas</span>' : '<span class="muted">Por unidad</span>') +
-              '<button class="subtle mon-export-btn" data-st="'+s.id+'" style="padding:4px 8px;font-size:12px">📥 Excel</button>' +
-              '<button class="subtle mon-clear-btn" data-st="'+s.id+'" style="padding:4px 8px;font-size:12px">🧹 Reiniciar real</button></span></div>';
-      if (s.type === "machine"){
+              (v.type==="machine" ? '<span class="muted">'+v.machineCount+' máquinas</span>' : '<span class="muted">Por unidad</span>') +
+              (v.dailyGoal>0 ? '<span class="muted">Meta diaria '+v.dailyGoal+'</span>' : '') +
+              '<button class="subtle mon-export-btn" data-view="'+v.id+'" style="padding:4px 8px;font-size:12px">📥 Excel</button>' +
+              '<button class="subtle mon-clear-btn" data-view="'+v.id+'" style="padding:4px 8px;font-size:12px">🧹 Reiniciar real</button></span></div>';
+      if (v.type === "machine"){
         html += '<div class="machine-grid">';
-        s.machines.forEach(function(m, idx){
+        v.machines.forEach(function(m, idx){
           var busy = m.status === "processing";
           html += '<div class="machine-slot '+(busy?"busy":"idle")+'" data-machine="'+idx+'" data-start="'+(m.startTime||"")+'">' +
                   '<div>Máquina '+(idx+1)+'</div>' +
@@ -860,38 +1243,40 @@
         });
         html += '</div>';
       }
-      html += renderPeriodsTable(s);
+      html += renderPeriodsTable(v);
       html += '</div>';
     });
     main.innerHTML = html;
     main.querySelectorAll(".mon-clear-btn").forEach(function(b){
       b.addEventListener("click", function(){
-        var s = stations.find(function(x){ return x.id === b.getAttribute("data-st"); });
-        if (s) clearStationRecords(s);
+        var v = allViews().find(function(x){ return x.id === b.getAttribute("data-view"); });
+        if (v) clearStationRecords(v);
       });
     });
     main.querySelectorAll(".mon-export-btn").forEach(function(b){
       b.addEventListener("click", function(){
-        var s = stations.find(function(x){ return x.id === b.getAttribute("data-st"); });
-        if (s) exportStationToExcel(s);
+        var v = allViews().find(function(x){ return x.id === b.getAttribute("data-view"); });
+        if (v) exportStationToExcel(v);
       });
     });
     var exportLineBtn = document.getElementById("exportLineBtn");
     if (exportLineBtn) exportLineBtn.addEventListener("click", exportLineToExcel);
   }
-  function renderPeriodsTable(s){
-    if (!s.periods.length) return '<p class="muted">Sin periodos configurados para esta estación.</p>';
-    var activeId = activePeriodId(s);
+  function renderPeriodsTable(v){
+    if (!v.periods.length) return '<p class="muted">Sin periodos configurados para esta estación.</p>';
+    var activeId = activePeriodId(v);
+    var targets = computeTargets(v);
     var html = '<table><thead><tr><th>Periodo</th><th>Meta</th><th>Real</th><th>Productividad acumulada</th><th>Productividad actual</th></tr></thead><tbody>';
-    s.periods.slice().sort(function(a,b){ return a.start.localeCompare(b.start); }).forEach(function(p){
-      var count = countForPeriod(s,p);
-      var eff = p.target>0 ? Math.round((count/p.target)*100) : null;
+    v.periods.slice().sort(function(a,b){ return a.start.localeCompare(b.start); }).forEach(function(p){
+      var count = countForPeriod(v,p);
+      var target = targets[p.id] || 0;
+      var eff = target>0 ? Math.round((count/target)*100) : null;
       var effClass = eff===null? "" : (eff>=100?"eff-good": eff>=70?"eff-mid":"eff-bad");
-      var curEff = currentProductivity(s, p, count);
+      var curEff = currentProductivity(v, p, count, target);
       var curEffClass = curEff===null? "" : (curEff>=100?"eff-good": curEff>=70?"eff-mid":"eff-bad");
       html += '<tr class="'+(p.id===activeId?"active-period":"")+'">' +
               '<td>'+p.start+'–'+p.end+(p.id===activeId?' ⏱':'')+'</td>' +
-              '<td>'+p.target+'</td><td>'+count+'</td>' +
+              '<td>'+target+'</td><td>'+count+'</td>' +
               '<td class="'+effClass+'">'+(eff===null?"–":eff+"%")+'</td>' +
               '<td class="'+curEffClass+'">'+(curEff===null?"–":curEff+"%")+'</td></tr>';
     });
@@ -900,22 +1285,20 @@
   }
   function renderMonitorTimers(){
     if (activeTab !== "monitor") return;
-    stations.forEach(function(s){
-      var card = document.getElementById("mon-"+s.id);
+    allViews().forEach(function(v){
+      var card = document.getElementById("mon-"+v.id);
       if (!card) return;
-      if (s.type === "machine"){
-        s.machines.forEach(function(m, idx){
+      if (v.type === "machine"){
+        v.machines.forEach(function(m, idx){
           var slot = card.querySelector('.machine-slot[data-machine="'+idx+'"] .timer');
           if (slot && m.status === "processing"){ slot.textContent = fmtElapsed(Date.now()-m.startTime); }
         });
       }
-      // refresh active-period highlighting / counts without full re-render churn
-      var table = card.querySelectorAll("table tr");
-      // cheap approach: just re-render periods table region if present
+      // refresca la tabla (resaltado del periodo actual, real y productividades)
       var oldTable = card.querySelector("table");
       if (oldTable){
         var wrapper = document.createElement("div");
-        wrapper.innerHTML = renderPeriodsTable(s);
+        wrapper.innerHTML = renderPeriodsTable(v);
         oldTable.replaceWith(wrapper.firstElementChild);
       }
     });
@@ -938,6 +1321,12 @@
       if (st.type === "unit"){
         html += '<div class="big-btns">' +
                 '<button class="big-btn start" id="btnMarkUnit">🔘 Marcar unidad</button>' +
+                '</div>';
+      } else if (st.type === "multi"){
+        html += '<div class="entry-grid n'+st.entries.length+'">' +
+                st.entries.map(function(en, i){
+                  return '<button class="entry-btn c'+(i%4)+'" data-eid="'+en.id+'">'+escapeHtml(en.name)+'</button>';
+                }).join("") +
                 '</div>';
       } else {
         html += '<div class="machine-grid">';
@@ -973,19 +1362,37 @@
     if (btnR) btnR.addEventListener("click", function(){ pressReceived(st); });
     if (btnF) btnF.addEventListener("click", function(){ pressFinished(st); });
     if (btnU) btnU.addEventListener("click", function(){ pressMarkUnit(st); });
+    main.querySelectorAll(".entry-btn").forEach(function(b){
+      b.addEventListener("click", function(){ pressEntry(st, b.getAttribute("data-eid")); });
+    });
   }
   function periodCounterInnerHtml(station){
     var activeId = activePeriodId(station);
     var period = station.periods.find(function(p){ return p.id === activeId; });
+    if (station.type === "multi"){
+      // el contador se divide según el número de entradas configuradas
+      var views = viewsForStation(station);
+      var boxes = views.map(function(v){
+        var count = period ? countForPeriod(v, period) : "–";
+        var t = period ? (computeTargets(v)[period.id] || 0) : 0;
+        return '<div class="entry-counter"><div class="entry-counter-name">'+escapeHtml(v.entryName)+'</div>' +
+               '<div class="entry-counter-value">'+count+'</div>' +
+               (t>0 ? '<div class="entry-counter-meta">meta '+t+'</div>' : '') + '</div>';
+      }).join("");
+      return '<div class="period-counter-label">'+(period ? 'Periodo actual: '+period.start+'–'+period.end : 'Sin periodo activo')+'</div>' +
+             '<div class="entry-counters" style="grid-template-columns:repeat('+Math.max(1, views.length)+',1fr)">'+boxes+'</div>' +
+             '<div class="period-counter-sub">unidades marcadas en este periodo, por entrada</div>';
+    }
     if (!period){
       return '<div class="period-counter-label">Sin periodo activo</div>' +
              '<div class="period-counter-value">–</div>' +
              '<div class="period-counter-sub">no hay un periodo configurado para esta hora</div>';
     }
     var count = countForPeriod(station, period);
+    var target = computeTargets(station)[period.id] || 0;
     return '<div class="period-counter-label">Periodo actual: '+period.start+'–'+period.end+'</div>' +
            '<div class="period-counter-value">'+count+'</div>' +
-           '<div class="period-counter-sub">unidades marcadas en este periodo'+(period.target>0?' · meta '+period.target:'')+'</div>';
+           '<div class="period-counter-sub">unidades marcadas en este periodo'+(target>0?' · meta '+target:'')+'</div>';
   }
   function renderStationTimers(){
     if (activeTab !== "station") return;
@@ -994,7 +1401,7 @@
     if (!st || !card) return;
     var counterBox = card.querySelector("#periodCounterBox");
     if (counterBox) counterBox.innerHTML = periodCounterInnerHtml(st);
-    if (st.type === "unit") return;
+    if (st.type !== "machine") return;
     st.machines.forEach(function(m, idx){
       var slot = card.querySelector('.machine-slot[data-machine="'+idx+'"] .timer');
       if (slot && m.status === "processing"){ slot.textContent = fmtElapsed(Date.now()-m.startTime); }
