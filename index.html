@@ -143,6 +143,9 @@
   .period-counter-label { font-size: 14px; color: var(--primary); font-weight: 700; }
   .period-counter-value { font-size: 42px; font-weight: 800; color: var(--primary); line-height:1.2; margin: 4px 0; }
   .period-counter-sub { font-size: 12px; color: var(--text-dim); }
+  .tsel { display:inline-flex; align-items:center; gap:2px; }
+  .tsel select { min-width:0; width:auto; padding:7px 4px; }
+  .warn-note { color: var(--amber); font-size: 12px; }
 
   :root { --purple:#7c4dcc; --purple-dim:#efe8fb; }
   @media (prefers-color-scheme: dark) {
@@ -320,6 +323,7 @@
   var configSelectedStationId = null;
   var stationTabStationId = lsGet("station-app:stationtab-station", "");
   var stationsChannel = null;
+  var reloadStations = null; // vuelve a leer las estaciones de la base (se asigna en subscribeStations)
   var entrySaving = {}; // stationId -> true mientras se guarda el conteo de entradas
   var entryDirty = {};  // stationId -> true si hubo marcas nuevas durante el guardado
   var pendingWrite = {}; // stationId -> bool, to prevent overlapping writes to same doc
@@ -426,6 +430,7 @@
         render();
       });
     }
+    reloadStations = load;
     load();
     stationsChannel = supa.channel("stations-changes-"+selectedLineId)
       .on("postgres_changes", {event:"*", schema:"public", table:"stations", filter:"line_id=eq."+selectedLineId}, load)
@@ -560,29 +565,82 @@
     });
   }
 
-  // ---------- descansos ----------
-  function saveBreaks(station, breaks, errMsg){
-    supa.from("stations").update({breaks: breaks}).eq("id", station.id).then(function(res){
-      if (res.error) toast(errMsg);
+  // ---------- utilidades de hora y guardado de la configuración ----------
+  function minutesToHHMM(m){
+    m = Math.max(0, Math.min(1439, Math.round(m)));
+    return pad2(Math.floor(m/60))+":"+pad2(m%60);
+  }
+  function fmtDur(m){
+    if (m < 60) return m+" min";
+    return Math.floor(m/60)+" h"+(m%60 ? " "+(m%60)+" min" : "");
+  }
+  function currentStation(id){ return stations.find(function(s){ return s.id === id; }); }
+  // Selector de hora en formato 24 h (sin a. m./p. m. y sin valores intermedios al teclear):
+  // cada cambio es una sola elección completa.
+  function timeSelectHtml(cls, value){
+    var m = String(value || "00:00").match(/^(\d{1,2}):(\d{2})/);
+    var h = m ? Math.min(23, parseInt(m[1],10)) : 0, mi = m ? Math.min(59, parseInt(m[2],10)) : 0;
+    var hs = "", ms = "", i;
+    for (i=0;i<24;i++) hs += '<option value="'+pad2(i)+'"'+(i===h?' selected':'')+'>'+pad2(i)+'</option>';
+    for (i=0;i<60;i++) ms += '<option value="'+pad2(i)+'"'+(i===mi?' selected':'')+'>'+pad2(i)+'</option>';
+    return '<span class="tsel '+cls+'"><select class="th" aria-label="Hora">'+hs+'</select>:' +
+           '<select class="tm" aria-label="Minutos">'+ms+'</select></span>';
+  }
+  function wireTimeSel(row, cls, handler){
+    var span = row.querySelector("."+cls);
+    if (!span) return;
+    span.addEventListener("change", function(e){
+      e.stopPropagation();
+      handler(span.querySelector(".th").value+":"+span.querySelector(".tm").value);
     });
   }
+  // Aplica el cambio de inmediato en local (así ediciones seguidas se acumulan y no se pisan
+  // con datos viejos) y lo manda a Supabase; si falla, vuelve a leer lo guardado.
+  function saveStationFields(stationId, fields, errMsg){
+    var st = currentStation(stationId);
+    if (st) Object.keys(fields).forEach(function(k){ st[k] = fields[k]; });
+    render();
+    supa.from("stations").update(fields).eq("id", stationId).then(function(res){
+      if (res.error){ toast(errMsg); if (reloadStations) reloadStations(); }
+    });
+  }
+
+  // ---------- descansos ----------
   function addBreak(station){
-    var breaks = station.breaks.slice();
-    breaks.push({id: uid(), start:"12:00", end:"12:30"});
-    saveBreaks(station, breaks, "No se pudo agregar el descanso");
+    var st = currentStation(station.id) || station;
+    var breaks = st.breaks.slice();
+    var startM = 12*60;
+    if (breaks.length){
+      startM = Math.min(23*60, Math.max.apply(null, breaks.map(function(b){ return toMinutes(b.end); })));
+    }
+    breaks.push({id: uid(), start: minutesToHHMM(startM), end: minutesToHHMM(startM+30)});
+    saveStationFields(st.id, {breaks: breaks}, "No se pudo agregar el descanso");
   }
   function updateBreak(station, breakId, field, value){
-    var breaks = station.breaks.map(function(b){
-      if (b.id !== breakId) return b;
-      var nb = Object.assign({}, b);
-      nb[field] = value;
-      if (nb.start && nb.end && nb.end <= nb.start) toast("⚠️ El fin del descanso debe ser posterior al inicio");
-      return nb;
-    });
-    saveBreaks(station, breaks, "No se pudo guardar el descanso");
+    var st = currentStation(station.id) || station;
+    var cur = st.breaks.find(function(b){ return b.id === breakId; });
+    if (!cur) return;
+    var nb = Object.assign({}, cur);
+    if (field === "start"){
+      // al mover el inicio, el descanso conserva su duración (no se queda con un fin viejo)
+      var dur = toMinutes(cur.end) - toMinutes(cur.start);
+      if (dur <= 0) dur = 30;
+      if (toMinutes(value) + dur > 1439){ toast("⚠️ El descanso no cabe antes de medianoche"); render(); return; }
+      nb.start = value;
+      nb.end = minutesToHHMM(toMinutes(value) + dur);
+    } else {
+      if (toMinutes(value) <= toMinutes(cur.start)){
+        toast("⚠️ El fin del descanso debe ser posterior al inicio ("+cur.start+")");
+        render(); return;
+      }
+      nb.end = value;
+    }
+    var breaks = st.breaks.map(function(b){ return b.id === breakId ? nb : b; });
+    saveStationFields(st.id, {breaks: breaks}, "No se pudo guardar el descanso");
   }
   function deleteBreak(station, breakId){
-    saveBreaks(station, station.breaks.filter(function(b){ return b.id !== breakId; }), "No se pudo eliminar el descanso");
+    var st = currentStation(station.id) || station;
+    saveStationFields(st.id, {breaks: st.breaks.filter(function(b){ return b.id !== breakId; })}, "No se pudo eliminar el descanso");
   }
 
   // ---------- entradas (estación "de entradas múltiples") ----------
@@ -686,29 +744,45 @@
 
   // ---------- periods ----------
   function addPeriod(station){
-    var periods = station.periods.slice();
-    periods.push({id: uid(), start:"08:00", end:"09:00", target:0});
-    supa.from("stations").update({periods:periods}).eq("id", station.id).then(function(res){
-      if (res.error) toast("No se pudo agregar periodo");
-    });
+    var st = currentStation(station.id) || station;
+    var periods = st.periods.slice();
+    var startM = 8*60;
+    if (periods.length){
+      var lastEnd = Math.max.apply(null, periods.map(function(p){ return toMinutes(p.end); }));
+      if (lastEnd <= 22*60) startM = lastEnd; // el nuevo periodo arranca donde termina el último
+    }
+    periods.push({id: uid(), start: minutesToHHMM(startM), end: minutesToHHMM(startM+60), target:0});
+    saveStationFields(st.id, {periods: periods}, "No se pudo agregar periodo");
   }
   function updatePeriod(station, periodId, field, value){
-    var periods = station.periods.map(function(p){
-      if (p.id !== periodId) return p;
-      var np = Object.assign({}, p);
-      if (field === "target") np.target = Math.max(0, parseInt(value,10) || 0);
-      else np[field] = value;
-      return np;
-    });
-    supa.from("stations").update({periods:periods}).eq("id", station.id).then(function(res){
-      if (res.error) toast("No se pudo guardar el periodo");
-    });
+    var st = currentStation(station.id) || station;
+    var cur = st.periods.find(function(p){ return p.id === periodId; });
+    if (!cur) return;
+    var np = Object.assign({}, cur);
+    if (field === "target"){
+      np.target = Math.max(0, parseInt(value,10) || 0);
+    } else if (field === "start"){
+      np.start = value;
+      if (toMinutes(value) >= toMinutes(cur.end)){
+        // si el nuevo inicio pasa del fin, el fin se recorre conservando la duración
+        var dur = toMinutes(cur.end) - toMinutes(cur.start);
+        if (dur <= 0) dur = 60;
+        if (toMinutes(value) + dur > 1439){ toast("⚠️ El periodo no cabe antes de medianoche"); render(); return; }
+        np.end = minutesToHHMM(toMinutes(value) + dur);
+      }
+    } else {
+      if (toMinutes(value) <= toMinutes(cur.start)){
+        toast("⚠️ El fin del periodo debe ser posterior al inicio ("+cur.start+")");
+        render(); return;
+      }
+      np.end = value;
+    }
+    var periods = st.periods.map(function(p){ return p.id === periodId ? np : p; });
+    saveStationFields(st.id, {periods: periods}, "No se pudo guardar el periodo");
   }
   function deletePeriod(station, periodId){
-    var periods = station.periods.filter(function(p){ return p.id !== periodId; });
-    supa.from("stations").update({periods:periods}).eq("id", station.id).then(function(res){
-      if (res.error) toast("No se pudo eliminar el periodo");
-    });
+    var st = currentStation(station.id) || station;
+    saveStationFields(st.id, {periods: st.periods.filter(function(p){ return p.id !== periodId; })}, "No se pudo eliminar el periodo");
   }
 
   // ---------- operator actions ----------
@@ -1134,20 +1208,26 @@
     } else {
       var cfgViews = viewsForStation(st);
       var cfgTargets = cfgViews.map(function(v){ return computeTargets(v); });
+      var hasAuto = st.type === "multi" || st.dailyGoal > 0;
       st.periods.forEach(function(p){
+        var prodMin = Math.max(0, productiveBetween(st, toMinutes(p.start), toMinutes(p.end)));
+        var prodNote = hasAuto
+          ? (prodMin > 0 ? ' <span class="muted">· '+fmtDur(prodMin)+' productivos</span>'
+                         : ' <span class="warn-note">· cubierto por descansos</span>')
+          : '';
         var targetCell;
         if (st.type === "multi"){
           targetCell = ' · <span class="muted">Metas: ' + cfgViews.map(function(v, i){
             return escapeHtml(v.entryName)+' <b>'+(cfgTargets[i][p.id]||0)+'</b>';
-          }).join(' · ') + '</span>';
+          }).join(' · ') + '</span>' + prodNote;
         } else if (st.dailyGoal > 0){
-          targetCell = ' · <span class="muted">Meta (auto): <b>'+(cfgTargets[0][p.id]||0)+'</b></span>';
+          targetCell = ' · <span class="muted">Meta (auto): <b>'+(cfgTargets[0][p.id]||0)+'</b></span>' + prodNote;
         } else {
           targetCell = ' · Meta: <input type="number" min="0" class="p-target" value="'+(p.target||0)+'" style="width:70px">';
         }
         html += '<div class="period-row" data-pid="'+p.id+'">' +
-          '<input type="time" class="p-start" value="'+p.start+'"> a ' +
-          '<input type="time" class="p-end" value="'+p.end+'">' + targetCell +
+          timeSelectHtml('p-start', p.start) + ' a ' +
+          timeSelectHtml('p-end', p.end) + targetCell +
           '<button class="danger p-del">🗑️</button></div>';
       });
     }
@@ -1158,13 +1238,36 @@
       html += '<p class="muted">Sin descansos. Agrega los que necesites (en cualquier punto del turno): no cuentan como tiempo productivo al repartir la meta.</p>';
     } else {
       st.breaks.forEach(function(b){
+        var bs = toMinutes(b.start), be = toMinutes(b.end), dur = be - bs, inside = 0;
+        st.periods.forEach(function(p){
+          var s = Math.max(bs, toMinutes(p.start)), e = Math.min(be, toMinutes(p.end));
+          if (e > s) inside += e - s;
+        });
+        var note;
+        if (dur <= 0) note = '<span class="warn-note">⚠️ el fin debe ser posterior al inicio</span>';
+        else if (!st.periods.length) note = '<span class="muted">'+fmtDur(dur)+'</span>';
+        else if (inside === 0) note = '<span class="muted">'+fmtDur(dur)+'</span> <span class="warn-note">⚠️ fuera de los periodos: no afecta la meta</span>';
+        else if (inside < dur) note = '<span class="muted">'+fmtDur(dur)+'</span> <span class="warn-note">⚠️ parte fuera de los periodos (descuenta '+fmtDur(inside)+')</span>';
+        else note = '<span class="muted">'+fmtDur(dur)+'</span>';
         html += '<div class="period-row" data-bid="'+b.id+'">' +
-          '<input type="time" class="b-start" value="'+b.start+'"> a ' +
-          '<input type="time" class="b-end" value="'+b.end+'">' +
+          timeSelectHtml('b-start', b.start) + ' a ' +
+          timeSelectHtml('b-end', b.end) + ' ' + note +
           '<button class="danger b-del">🗑️</button></div>';
       });
     }
     html += '<button class="ghost" id="addBreakBtn">+ Agregar descanso</button>';
+    if (st.periods.length){
+      var totMin = 0, prodTot = 0;
+      st.periods.forEach(function(p){
+        var s = toMinutes(p.start), e = toMinutes(p.end);
+        if (e > s){ totMin += e - s; prodTot += productiveBetween(st, s, e); }
+      });
+      var rate = '';
+      if (st.type !== "multi" && st.dailyGoal > 0 && prodTot > 0){
+        rate = ' · Ritmo: <b>'+(st.dailyGoal / prodTot).toFixed(2)+'</b> unid/min';
+      }
+      html += '<p class="muted" style="margin:10px 0 0">Tiempo de periodos: <b>'+fmtDur(totMin)+'</b> · Descansos: <b>'+fmtDur(totMin - prodTot)+'</b> · Productivo: <b>'+fmtDur(prodTot)+'</b>'+rate+'</p>';
+    }
     html += '<div class="section-title">Contador de piezas</div>';
     html += '<button class="danger" id="clearRecordsBtn">🧹 Limpiar contador de piezas (real)</button>';
     html += '</div>';
@@ -1195,16 +1298,16 @@
 
     document.querySelectorAll(".period-row[data-pid]").forEach(function(row){
       var pid = row.getAttribute("data-pid");
-      row.querySelector(".p-start").addEventListener("change", function(e){ updatePeriod(st,pid,"start",e.target.value); });
-      row.querySelector(".p-end").addEventListener("change", function(e){ updatePeriod(st,pid,"end",e.target.value); });
+      wireTimeSel(row, "p-start", function(v){ updatePeriod(st,pid,"start",v); });
+      wireTimeSel(row, "p-end", function(v){ updatePeriod(st,pid,"end",v); });
       var tgt = row.querySelector(".p-target");
       if (tgt) tgt.addEventListener("change", function(e){ updatePeriod(st,pid,"target",e.target.value); });
       row.querySelector(".p-del").addEventListener("click", function(){ deletePeriod(st,pid); });
     });
     document.querySelectorAll(".period-row[data-bid]").forEach(function(row){
       var bid = row.getAttribute("data-bid");
-      row.querySelector(".b-start").addEventListener("change", function(e){ updateBreak(st,bid,"start",e.target.value); });
-      row.querySelector(".b-end").addEventListener("change", function(e){ updateBreak(st,bid,"end",e.target.value); });
+      wireTimeSel(row, "b-start", function(v){ updateBreak(st,bid,"start",v); });
+      wireTimeSel(row, "b-end", function(v){ updateBreak(st,bid,"end",v); });
       row.querySelector(".b-del").addEventListener("click", function(){ deleteBreak(st,bid); });
     });
     document.querySelectorAll(".period-row[data-eid]").forEach(function(row){
